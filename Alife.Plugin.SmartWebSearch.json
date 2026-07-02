@@ -1,0 +1,31 @@
+{
+  "id": "Alife.Plugin.SmartWebSearch",
+  "name": "网络智能搜索",
+  "author": "doro",
+  "description": "让你的桌宠拥有网络搜索的能力！百度AI总结搜索(搜索+大模型总结一步到位) + 智能搜索生成(标准版，支持可选深度搜索/知识注入/追问) + 双引擎搜索(Tavily+百度智能路由) + 百度热搜(9个垂直分类) + 智能识图(图片URL自动下载识别)。多账号轮换，结果缓存，图片自动压缩。",
+
+  "dependencies": {
+    "Alife.Function.FunctionCaller": ""
+  },
+
+  "environments": {
+    "nuget": {
+      "System.Drawing.Common": "9.0.0"
+    },
+    "pip": {}
+  },
+
+  "tags": [
+    "网络搜索",
+    "AI搜索",
+    "QQ相关工具"
+  ],
+
+  "releases": {
+    "1.0.0": {
+      "date": "2026-07-02",
+      "note": "多功能AI搜索：AI总结搜索(高性能版) + 智能搜索生成(标准版) + 双引擎搜索(Tavily+百度) + 百度热搜 + 智能识图，智能路由，多账号轮换，图片自动压缩，结果缓存",
+      "file": ""
+    }
+  }
+}
