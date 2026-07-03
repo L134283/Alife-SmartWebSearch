@@ -10,7 +10,7 @@
 
   "environments": {
     "nuget": {
-      "System.Drawing.Common": "9.0.0"
+      "System.Drawing.Common": ">=9.0.0"
     },
     "pip": {}
   },
