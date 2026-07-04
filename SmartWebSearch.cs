@@ -21,9 +21,9 @@ using Microsoft.Extensions.Logging;
 namespace Alife.Plugin.SmartWebSearch;
 
 [Module(
-    "网络智能搜索",
-    "多功能AI搜索插件：AI总结搜索 + 智能搜索生成 + 双引擎搜索(Tavily+百度) + 百度热搜 + 智能识图，智能路由，多账号轮换，图片自动压缩，结果缓存。",
-    defaultCategory: "Doro的妙妙工具",
+    "缃戠粶鏅鸿兘鎼滅储",
+    "澶氬姛鑳紸I鎼滅储鎻掍欢锛欰I鎬荤粨鎼滅储 + 鏅鸿兘鎼滅储鐢熸垚 + 鍙屽紩鎿庢悳绱?Tavily+鐧惧害) + 鐧惧害鐑悳 + 鏅鸿兘璇嗗浘锛屾櫤鑳借矾鐢憋紝澶氳处鍙疯疆鎹紝鍥剧墖鑷姩鍘嬬缉锛岀粨鏋滅紦瀛樸€?,
+    defaultCategory: "Doro鐨勫濡欏伐鍏?,
     EditorUI = typeof(SmartWebSearchUI))]
 public class SmartWebSearch(
     XmlFunctionCaller functionService,
@@ -40,20 +40,20 @@ public class SmartWebSearch(
     private const string BaiduTrendingUrl = "https://qianfan.baidubce.com/v2/tools/baidu_trending";
     private const string BaiduImageRecognitionUrl = "https://qianfan.baidubce.com/v2/tools/image_general";
 
-    // 账号轮换状态：记录已耗尽的账号索引
+    // 璐﹀彿杞崲鐘舵€侊細璁板綍宸茶€楀敖鐨勮处鍙风储寮?
     private readonly HashSet<int> _exhaustedTavily = new();
     private readonly HashSet<int> _exhaustedBaidu = new();
     private readonly object _lock = new();
 
-    // 搜索结果缓存
+    // 鎼滅储缁撴灉缂撳瓨
     private static readonly Dictionary<string, (string result, DateTime expiry)> _cache = new();
     private static readonly object _cacheLock = new();
 
     public SmartWebSearchConfig? Configuration { get; set; } = new();
 
-    static void Log(string msg) => Console.WriteLine($"[智能搜索] {msg}");
+    static void Log(string msg) => Console.WriteLine($"[鏅鸿兘鎼滅储] {msg}");
 
-    #region 初始化与系统提示词
+    #region 鍒濆鍖栦笌绯荤粺鎻愮ず璇?
 
     public override async Task AwakeAsync(AwakeContext context)
     {
@@ -61,7 +61,7 @@ public class SmartWebSearch(
 
         var handler = new XmlHandler(this)
         {
-            Description = "此服务提供多功能AI搜索能力：AI总结搜索、智能搜索生成、双引擎搜索、百度热搜、智能识图。",
+            Description = "姝ゆ湇鍔℃彁渚涘鍔熻兘AI鎼滅储鑳藉姏锛欰I鎬荤粨鎼滅储銆佹櫤鑳芥悳绱㈢敓鎴愩€佸弻寮曟搸鎼滅储銆佺櫨搴︾儹鎼溿€佹櫤鑳借瘑鍥俱€?,
         };
         functionService.RegisterHandler(handler);
 
@@ -71,54 +71,52 @@ public class SmartWebSearch(
 
         var engineDesc = cfg.Engine switch
         {
-            "tavily" => $"仅 Tavily（{tCount} 个账号）",
-            "baidu" => $"仅百度（{bCount} 个账号）",
-            _ => $"智能路由（Tavily {tCount} 个 + 百度 {bCount} 个）"
+            "tavily" => $"浠?Tavily锛坽tCount} 涓处鍙凤級",
+            "baidu" => $"浠呯櫨搴︼紙{bCount} 涓处鍙凤級",
+            _ => $"鏅鸿兘璺敱锛圱avily {tCount} 涓?+ 鐧惧害 {bCount} 涓級"
         };
 
         Prompt($$"""
-            ## 网络搜索能力
-            以下情况请主动使用搜索：用户要求搜索、遇到不确定/可能过时的知识、需要最新信息或事实核查。
+            ## 缃戠粶鎼滅储鑳藉姏
+            浠ヤ笅鎯呭喌璇蜂富鍔ㄤ娇鐢ㄦ悳绱細鐢ㄦ埛瑕佹眰鎼滅储銆侀亣鍒颁笉纭畾/鍙兘杩囨椂鐨勭煡璇嗐€侀渶瑕佹渶鏂颁俊鎭垨浜嬪疄鏍告煡銆?
 
-            ### 工具优先级（百度渠道）
-            1. **SmartSummary（AI总结搜索）** — 默认首选。搜索+大模型总结一步到位，100次/日。
-            2. **SmartChatSearch（智能搜索生成）** — SmartSummary失败时降级。功能最全面，支持可选深度搜索（耗费较多额度）。
-            3. **Search（普通搜索）** — AI搜索均失败时最终降级。双引擎智能路由(Tavily+百度)。
-            4. **HotSearch（百度热搜）** — 用户想看热搜/今日热点时使用。9个垂直分类。
-            5. **ImageRecognition（智能识图）** — 用户引用图片问"这是什么"时使用。传入图片URL。
+            ### 宸ュ叿浼樺厛绾э紙鐧惧害娓犻亾锛?
+            1. **SmartSummary锛圓I鎬荤粨鎼滅储锛?* 鈥?榛樿棣栭€夈€傛悳绱?澶фā鍨嬫€荤粨涓€姝ュ埌浣嶏紝100娆?鏃ャ€?
+            2. **SmartChatSearch锛堟櫤鑳芥悳绱㈢敓鎴愶級** 鈥?SmartSummary澶辫触鏃堕檷绾с€傚姛鑳芥渶鍏ㄩ潰锛屾敮鎸佸彲閫夋繁搴︽悳绱紙鑰楄垂杈冨棰濆害锛夈€?
+            3. **Search锛堟櫘閫氭悳绱級** 鈥?AI鎼滅储鍧囧け璐ユ椂鏈€缁堥檷绾с€傚弻寮曟搸鏅鸿兘璺敱(Tavily+鐧惧害)銆?
+            4. **HotSearch锛堢櫨搴︾儹鎼滐級** 鈥?鐢ㄦ埛鎯崇湅鐑悳/浠婃棩鐑偣鏃朵娇鐢ㄣ€?涓瀭鐩村垎绫汇€?
+            5. **ImageRecognition锛堟櫤鑳借瘑鍥撅級** 鈥?鐢ㄦ埛寮曠敤鍥剧墖闂?杩欐槸浠€涔?鏃朵娇鐢ㄣ€備紶鍏ュ浘鐗嘦RL銆?
 
-            ### 使用规则
-            - "搜一下"/"搜索" → SmartSummary → 失败则 SmartChatSearch → 再失败则 Search
-            - "看热搜"/"今天热点" → HotSearch
-            - 引用图片问"这是什么" → ImageRecognition
+            ### 浣跨敤瑙勫垯
+            - "鎼滀竴涓?/"鎼滅储" 鈫?SmartSummary 鈫?澶辫触鍒?SmartChatSearch 鈫?鍐嶅け璐ュ垯 Search
+            - "鐪嬬儹鎼?/"浠婂ぉ鐑偣" 鈫?HotSearch
+            - 寮曠敤鍥剧墖闂?杩欐槸浠€涔? 鈫?ImageRecognition
 
-            当前引擎配置：{{engineDesc}}
-            Search双引擎：中文→百度(中文强,支持图片/视频)，英文→Tavily(有AI摘要,英文强)，可通过engine参数指定
+            褰撳墠寮曟搸閰嶇疆锛歿{engineDesc}}
+            Search鍙屽紩鎿庯細涓枃鈫掔櫨搴?涓枃寮?鏀寔鍥剧墖/瑙嗛)锛岃嫳鏂団啋Tavily(鏈堿I鎽樿,鑻辨枃寮?锛屽彲閫氳繃engine鍙傛暟鎸囧畾
 
-            ## 提供工具
-            {{handler.FunctionDocument()}}
             """);
     }
 
     #endregion
 
-    #region 主搜索入口
+    #region 涓绘悳绱㈠叆鍙?
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("搜索互联网获取实时信息。支持 Tavily 和百度双引擎智能路由。当用户要求搜索、或你遇到不确定/可能过时的知识时，主动调用。")]
+    [Description("鎼滅储浜掕仈缃戣幏鍙栧疄鏃朵俊鎭€傛敮鎸?Tavily 鍜岀櫨搴﹀弻寮曟搸鏅鸿兘璺敱銆傚綋鐢ㄦ埛瑕佹眰鎼滅储銆佹垨浣犻亣鍒颁笉纭畾/鍙兘杩囨椂鐨勭煡璇嗘椂锛屼富鍔ㄨ皟鐢ㄣ€?)]
     public async Task Search(
-        [Description("搜索关键词或问题")] string query,
-        [Description("指定搜索引擎：tavily / baidu。不传则使用智能路由（中文→百度，英文→Tavily）")] string? engine = null,
-        [Description("搜索深度：basic(快速) 或 advanced(深度)")] string? searchDepth = null,
-        [Description("搜索主题（仅Tavily）：general / news / finance")] string? topic = null,
-        [Description("时间范围：day / week / month / year")] string? timeRange = null,
-        [Description("返回结果数量，默认5，最多20")] int? maxResults = null,
-        [Description("是否包含图片结果（仅百度）")] bool? includeImages = null,
-        [Description("是否包含视频结果（仅百度）")] bool? includeVideos = null)
+        [Description("鎼滅储鍏抽敭璇嶆垨闂")] string query,
+        [Description("鎸囧畾鎼滅储寮曟搸锛歵avily / baidu銆備笉浼犲垯浣跨敤鏅鸿兘璺敱锛堜腑鏂団啋鐧惧害锛岃嫳鏂団啋Tavily锛?)] string? engine = null,
+        [Description("鎼滅储娣卞害锛歜asic(蹇€? 鎴?advanced(娣卞害)")] string? searchDepth = null,
+        [Description("鎼滅储涓婚锛堜粎Tavily锛夛細general / news / finance")] string? topic = null,
+        [Description("鏃堕棿鑼冨洿锛歞ay / week / month / year")] string? timeRange = null,
+        [Description("杩斿洖缁撴灉鏁伴噺锛岄粯璁?锛屾渶澶?0")] int? maxResults = null,
+        [Description("鏄惁鍖呭惈鍥剧墖缁撴灉锛堜粎鐧惧害锛?)] bool? includeImages = null,
+        [Description("鏄惁鍖呭惈瑙嗛缁撴灉锛堜粎鐧惧害锛?)] bool? includeVideos = null)
     {
         if (string.IsNullOrWhiteSpace(query))
         {
-            Poke("搜索关键词不能为空");
+            Poke("鎼滅储鍏抽敭璇嶄笉鑳戒负绌?);
             return;
         }
 
@@ -130,14 +128,14 @@ public class SmartWebSearch(
 
         if (!hasTavily && !hasBaidu)
         {
-            Poke("未配置任何搜索引擎的 API Key，请在插件设置中填写");
+            Poke("鏈厤缃换浣曟悳绱㈠紩鎿庣殑 API Key锛岃鍦ㄦ彃浠惰缃腑濉啓");
             return;
         }
 
         var depth = string.IsNullOrWhiteSpace(searchDepth) ? cfg.SearchDepth : searchDepth;
         var results = Math.Clamp(maxResults ?? cfg.MaxResults, 1, 20);
 
-        // 缓存检查
+        // 缂撳瓨妫€鏌?
         var cacheKey = $"{engine}:{query}:{depth}:{results}:{topic}:{timeRange}:{includeImages}:{includeVideos}";
         if (cfg.EnableCache)
         {
@@ -145,17 +143,17 @@ public class SmartWebSearch(
             {
                 if (_cache.TryGetValue(cacheKey, out var cached) && cached.expiry > DateTime.Now)
                 {
-                    Log($"缓存命中: {query[..Math.Min(30, query.Length)]}...");
+                    Log($"缂撳瓨鍛戒腑: {query[..Math.Min(30, query.Length)]}...");
                     Poke(cached.result);
                     return;
                 }
             }
         }
 
-        // 清空已耗尽标记（每次新搜索重新尝试，额度可能已刷新）
+        // 娓呯┖宸茶€楀敖鏍囪锛堟瘡娆℃柊鎼滅储閲嶆柊灏濊瘯锛岄搴﹀彲鑳藉凡鍒锋柊锛?
         lock (_lock) { _exhaustedTavily.Clear(); _exhaustedBaidu.Clear(); }
 
-        // 确定搜索顺序
+        // 纭畾鎼滅储椤哄簭
         var searchOrder = ResolveSearchOrder(engine, cfg.Engine, query, hasTavily, hasBaidu);
 
         string? result = null;
@@ -171,11 +169,11 @@ public class SmartWebSearch(
 
         if (result == null)
         {
-            Poke("所有搜索引擎均不可用，请检查 API Key 配置或等待额度刷新");
+            Poke("鎵€鏈夋悳绱㈠紩鎿庡潎涓嶅彲鐢紝璇锋鏌?API Key 閰嶇疆鎴栫瓑寰呴搴﹀埛鏂?);
             return;
         }
 
-        // 写入缓存
+        // 鍐欏叆缂撳瓨
         if (cfg.EnableCache)
         {
             lock (_cacheLock)
@@ -195,21 +193,21 @@ public class SmartWebSearch(
 
     #endregion
 
-    #region AI总结搜索（高性能版）
+    #region AI鎬荤粨鎼滅储锛堥珮鎬ц兘鐗堬級
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("AI总结搜索（高性能版）：搜索互联网并用大模型总结结果，一步到位。支持思考模型。当用户要求搜索时优先使用此工具。")]
+    [Description("AI鎬荤粨鎼滅储锛堥珮鎬ц兘鐗堬級锛氭悳绱簰鑱旂綉骞剁敤澶фā鍨嬫€荤粨缁撴灉锛屼竴姝ュ埌浣嶃€傛敮鎸佹€濊€冩ā鍨嬨€傚綋鐢ㄦ埛瑕佹眰鎼滅储鏃朵紭鍏堜娇鐢ㄦ宸ュ叿銆?)]
     public async Task SmartSummary(
-        [Description("搜索关键词或问题")] string query,
-        [Description("模型：auto_thinking(自动思考) / thinking / non_thinking")] string? model = null,
-        [Description("时间范围：day / week / month / year")] string? timeRange = null,
-        [Description("返回参考来源数量，默认5")] int? maxResults = null)
+        [Description("鎼滅储鍏抽敭璇嶆垨闂")] string query,
+        [Description("妯″瀷锛歛uto_thinking(鑷姩鎬濊€? / thinking / non_thinking")] string? model = null,
+        [Description("鏃堕棿鑼冨洿锛歞ay / week / month / year")] string? timeRange = null,
+        [Description("杩斿洖鍙傝€冩潵婧愭暟閲忥紝榛樿5")] int? maxResults = null)
     {
-        if (string.IsNullOrWhiteSpace(query)) { Poke("搜索关键词不能为空"); return; }
+        if (string.IsNullOrWhiteSpace(query)) { Poke("鎼滅储鍏抽敭璇嶄笉鑳戒负绌?); return; }
 
         var cfg = Configuration ?? new SmartWebSearchConfig();
         var baiduKeys = GetBaiduKeys(cfg);
-        if (!baiduKeys.Any(k => !string.IsNullOrWhiteSpace(k))) { Poke("AI总结搜索需要百度千帆API Key"); return; }
+        if (!baiduKeys.Any(k => !string.IsNullOrWhiteSpace(k))) { Poke("AI鎬荤粨鎼滅储闇€瑕佺櫨搴﹀崈甯咥PI Key"); return; }
 
         var useModel = string.IsNullOrWhiteSpace(model) ? cfg.SummaryModel : model;
         var results = Math.Clamp(maxResults ?? cfg.MaxResults, 1, 20);
@@ -220,7 +218,7 @@ public class SmartWebSearch(
             lock (_cacheLock)
             {
                 if (_cache.TryGetValue(cacheKey, out var cached) && cached.expiry > DateTime.Now)
-                { Log($"缓存命中(AI总结): {query[..Math.Min(30, query.Length)]}..."); Poke(cached.result); return; }
+                { Log($"缂撳瓨鍛戒腑(AI鎬荤粨): {query[..Math.Min(30, query.Length)]}..."); Poke(cached.result); return; }
             }
         }
 
@@ -248,7 +246,7 @@ public class SmartWebSearch(
 
             try
             {
-                Log($"AI总结[{idx + 1}] model={useModel} results={results}");
+                Log($"AI鎬荤粨[{idx + 1}] model={useModel} results={results}");
                 using var req = new HttpRequestMessage(HttpMethod.Post, BaiduSummaryUrl);
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
                 req.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
@@ -257,11 +255,11 @@ public class SmartWebSearch(
                 var raw = await resp.Content.ReadAsStringAsync();
 
                 if ((int)resp.StatusCode == 401 || (int)resp.StatusCode == 403)
-                { Log($"AI总结 账号{idx + 1}认证失败"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
+                { Log($"AI鎬荤粨 璐﹀彿{idx + 1}璁よ瘉澶辫触"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
 
                 if ((int)resp.StatusCode == 429)
                 {
-                    Log($"AI总结 账号{idx + 1}频率限制，等待2秒重试");
+                    Log($"AI鎬荤粨 璐﹀彿{idx + 1}棰戠巼闄愬埗锛岀瓑寰?绉掗噸璇?);
                     await Task.Delay(2000);
                     using var req2 = new HttpRequestMessage(HttpMethod.Post, BaiduSummaryUrl);
                     req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
@@ -272,10 +270,10 @@ public class SmartWebSearch(
                     {
                         if ((int)resp2.StatusCode == 401 || (int)resp2.StatusCode == 403)
                         { lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                        Log($"AI总结 重试失败({(int)resp2.StatusCode})"); continue;
+                        Log($"AI鎬荤粨 閲嶈瘯澶辫触({(int)resp2.StatusCode})"); continue;
                     }
                     var retrySummary = FormatSummaryResults(raw, query);
-                    Log($"AI总结[{idx + 1}]成功(重试)");
+                    Log($"AI鎬荤粨[{idx + 1}]鎴愬姛(閲嶈瘯)");
                     if (cfg.EnableCache) { lock (_cacheLock) _cache[cacheKey] = (retrySummary, DateTime.Now.AddMinutes(cfg.CacheTtlMinutes)); }
                     Poke(retrySummary); return;
                 }
@@ -287,20 +285,20 @@ public class SmartWebSearch(
                     var errMsg = errNode?["message"]?.GetValue<string>() ?? "";
                     if (errCode == 216003 || errMsg.Contains("quota", StringComparison.OrdinalIgnoreCase)
                         || errMsg.Contains("limit", StringComparison.OrdinalIgnoreCase))
-                    { Log($"AI总结 账号{idx + 1}额度异常(code={errCode})"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                    Log($"AI总结 请求失败({(int)resp.StatusCode}): {errMsg}"); continue;
+                    { Log($"AI鎬荤粨 璐﹀彿{idx + 1}棰濆害寮傚父(code={errCode})"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
+                    Log($"AI鎬荤粨 璇锋眰澶辫触({(int)resp.StatusCode}): {errMsg}"); continue;
                 }
 
                 var formatted = FormatSummaryResults(raw, query);
-                Log($"AI总结[{idx + 1}]成功");
+                Log($"AI鎬荤粨[{idx + 1}]鎴愬姛");
                 if (cfg.EnableCache) { lock (_cacheLock) _cache[cacheKey] = (formatted, DateTime.Now.AddMinutes(cfg.CacheTtlMinutes)); }
                 Poke(formatted); return;
             }
-            catch (TaskCanceledException) { Log($"AI总结 账号{idx + 1}超时"); continue; }
-            catch (Exception ex) { Log($"AI总结 账号{idx + 1}异常: {ex.Message}"); continue; }
+            catch (TaskCanceledException) { Log($"AI鎬荤粨 璐﹀彿{idx + 1}瓒呮椂"); continue; }
+            catch (Exception ex) { Log($"AI鎬荤粨 璐﹀彿{idx + 1}寮傚父: {ex.Message}"); continue; }
         }
 
-        Poke("AI总结搜索失败，所有百度账号均不可用。可尝试使用智能搜索生成(SmartChatSearch)或普通搜索(Search)");
+        Poke("AI鎬荤粨鎼滅储澶辫触锛屾墍鏈夌櫨搴﹁处鍙峰潎涓嶅彲鐢ㄣ€傚彲灏濊瘯浣跨敤鏅鸿兘鎼滅储鐢熸垚(SmartChatSearch)鎴栨櫘閫氭悳绱?Search)");
     }
 
     static string FormatSummaryResults(string rawJson, string query)
@@ -316,14 +314,14 @@ public class SmartWebSearch(
                 var message = choices[0]?["message"];
                 var reasoning = message?["reasoning_content"]?.GetValue<string>();
                 var content = message?["content"]?.GetValue<string>();
-                if (!string.IsNullOrWhiteSpace(reasoning)) { sb.AppendLine("## 思考过程"); sb.AppendLine(reasoning); sb.AppendLine(); }
-                if (!string.IsNullOrWhiteSpace(content)) { sb.AppendLine("## AI总结"); sb.AppendLine(content); sb.AppendLine(); }
+                if (!string.IsNullOrWhiteSpace(reasoning)) { sb.AppendLine("## 鎬濊€冭繃绋?); sb.AppendLine(reasoning); sb.AppendLine(); }
+                if (!string.IsNullOrWhiteSpace(content)) { sb.AppendLine("## AI鎬荤粨"); sb.AppendLine(content); sb.AppendLine(); }
             }
 
             var refs = node?["references"]?.AsArray();
             if (refs != null && refs.Count > 0)
             {
-                sb.AppendLine($"## 参考来源（共 {refs.Count} 条）");
+                sb.AppendLine($"## 鍙傝€冩潵婧愶紙鍏?{refs.Count} 鏉★級");
                 int n = 1;
                 foreach (var r in refs)
                 {
@@ -331,42 +329,42 @@ public class SmartWebSearch(
                     var url = r?["url"]?.GetValue<string>() ?? "";
                     var date = r?["date"]?.GetValue<string>() ?? "";
                     sb.AppendLine($"{n}. [{title}]({url})");
-                    if (!string.IsNullOrWhiteSpace(date)) sb.AppendLine($"   发布时间: {date}");
+                    if (!string.IsNullOrWhiteSpace(date)) sb.AppendLine($"   鍙戝竷鏃堕棿: {date}");
                     n++;
                 }
             }
 
-            if (sb.Length == 0) sb.AppendLine("AI总结完成但未返回有效内容");
+            if (sb.Length == 0) sb.AppendLine("AI鎬荤粨瀹屾垚浣嗘湭杩斿洖鏈夋晥鍐呭");
             return sb.ToString().Trim();
         }
-        catch (Exception ex) { Log($"AI总结 格式化异常: {ex.Message}"); return $"AI总结完成但结果解析失败:\n{rawJson}"; }
+        catch (Exception ex) { Log($"AI鎬荤粨 鏍煎紡鍖栧紓甯? {ex.Message}"); return $"AI鎬荤粨瀹屾垚浣嗙粨鏋滆В鏋愬け璐?\n{rawJson}"; }
     }
 
     #endregion
 
-    #region 智能搜索生成（标准版）
+    #region 鏅鸿兘鎼滅储鐢熸垚锛堟爣鍑嗙増锛?
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("智能搜索生成（标准版）：功能最全面的AI搜索，支持多模型、可选深度搜索、知识注入、追问等。适合复杂研究场景。")]
+    [Description("鏅鸿兘鎼滅储鐢熸垚锛堟爣鍑嗙増锛夛細鍔熻兘鏈€鍏ㄩ潰鐨凙I鎼滅储锛屾敮鎸佸妯″瀷銆佸彲閫夋繁搴︽悳绱€佺煡璇嗘敞鍏ャ€佽拷闂瓑銆傞€傚悎澶嶆潅鐮旂┒鍦烘櫙銆?)]
     public async Task SmartChatSearch(
-        [Description("搜索关键词或问题")] string query,
-        [Description("模型：deepseek-v3.2 / deepseek-r1 / ernie-4.5-turbo-32k 等")] string? model = null,
-        [Description("是否启用深度搜索（更精准但更慢，耗费较多额度）")] bool? deepSearch = null,
-        [Description("时间范围：day / week / month / year")] string? timeRange = null,
-        [Description("额外指令，用于引导AI的回答方向")] string? instruction = null,
-        [Description("是否启用推理模式")] bool? enableReasoning = null,
-        [Description("返回参考来源数量，默认5")] int? maxResults = null)
+        [Description("鎼滅储鍏抽敭璇嶆垨闂")] string query,
+        [Description("妯″瀷锛歞eepseek-v3.2 / deepseek-r1 / ernie-4.5-turbo-32k 绛?)] string? model = null,
+        [Description("鏄惁鍚敤娣卞害鎼滅储锛堟洿绮惧噯浣嗘洿鎱紝鑰楄垂杈冨棰濆害锛?)] bool? deepSearch = null,
+        [Description("鏃堕棿鑼冨洿锛歞ay / week / month / year")] string? timeRange = null,
+        [Description("棰濆鎸囦护锛岀敤浜庡紩瀵糀I鐨勫洖绛旀柟鍚?)] string? instruction = null,
+        [Description("鏄惁鍚敤鎺ㄧ悊妯″紡")] bool? enableReasoning = null,
+        [Description("杩斿洖鍙傝€冩潵婧愭暟閲忥紝榛樿5")] int? maxResults = null)
     {
-        if (string.IsNullOrWhiteSpace(query)) { Poke("搜索关键词不能为空"); return; }
+        if (string.IsNullOrWhiteSpace(query)) { Poke("鎼滅储鍏抽敭璇嶄笉鑳戒负绌?); return; }
         var cfg = Configuration ?? new SmartWebSearchConfig();
         var baiduKeys = GetBaiduKeys(cfg);
-        if (!baiduKeys.Any(k => !string.IsNullOrWhiteSpace(k))) { Poke("智能搜索生成需要百度千帆API Key"); return; }
+        if (!baiduKeys.Any(k => !string.IsNullOrWhiteSpace(k))) { Poke("鏅鸿兘鎼滅储鐢熸垚闇€瑕佺櫨搴﹀崈甯咥PI Key"); return; }
         var useModel = string.IsNullOrWhiteSpace(model) ? cfg.ChatSearchModel : model;
         var useDeepSearch = deepSearch ?? cfg.EnableDeepSearch;
         var results = Math.Clamp(maxResults ?? cfg.MaxResults, 1, 20);
         var cacheKey = $"chat:{query}:{useModel}:{useDeepSearch}:{timeRange}:{instruction}:{enableReasoning}:{results}";
         if (cfg.EnableCache)
-        { lock (_cacheLock) { if (_cache.TryGetValue(cacheKey, out var cached) && cached.expiry > DateTime.Now) { Log($"缓存命中(智能搜索生成): {query[..Math.Min(30, query.Length)]}..."); Poke(cached.result); return; } } }
+        { lock (_cacheLock) { if (_cache.TryGetValue(cacheKey, out var cached) && cached.expiry > DateTime.Now) { Log($"缂撳瓨鍛戒腑(鏅鸿兘鎼滅储鐢熸垚): {query[..Math.Min(30, query.Length)]}..."); Poke(cached.result); return; } } }
         lock (_lock) _exhaustedBaidu.Clear();
 
         var body = new JsonObject
@@ -392,17 +390,17 @@ public class SmartWebSearch(
             if (key == null) break;
             try
             {
-                Log($"智能搜索生成[{idx + 1}] model={useModel} deep={useDeepSearch}");
+                Log($"鏅鸿兘鎼滅储鐢熸垚[{idx + 1}] model={useModel} deep={useDeepSearch}");
                 using var req = new HttpRequestMessage(HttpMethod.Post, BaiduChatUrl);
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
                 req.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
                 using var resp = await _http.SendAsync(req);
                 var raw = await resp.Content.ReadAsStringAsync();
                 if ((int)resp.StatusCode == 401 || (int)resp.StatusCode == 403)
-                { Log($"智能搜索生成 账号{idx + 1}认证失败"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
+                { Log($"鏅鸿兘鎼滅储鐢熸垚 璐﹀彿{idx + 1}璁よ瘉澶辫触"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
                 if ((int)resp.StatusCode == 429)
                 {
-                    Log($"智能搜索生成 账号{idx + 1}频率限制，等待2秒重试");
+                    Log($"鏅鸿兘鎼滅储鐢熸垚 璐﹀彿{idx + 1}棰戠巼闄愬埗锛岀瓑寰?绉掗噸璇?);
                     await Task.Delay(2000);
                     using var req2 = new HttpRequestMessage(HttpMethod.Post, BaiduChatUrl);
                     req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
@@ -413,10 +411,10 @@ public class SmartWebSearch(
                     {
                         if ((int)resp2.StatusCode == 401 || (int)resp2.StatusCode == 403)
                         { lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                        Log($"智能搜索生成 重试失败({(int)resp2.StatusCode})"); continue;
+                        Log($"鏅鸿兘鎼滅储鐢熸垚 閲嶈瘯澶辫触({(int)resp2.StatusCode})"); continue;
                     }
                     var retryChat = FormatChatSearchResults(raw, query);
-                    Log($"智能搜索生成[{idx + 1}]成功(重试)");
+                    Log($"鏅鸿兘鎼滅储鐢熸垚[{idx + 1}]鎴愬姛(閲嶈瘯)");
                     if (cfg.EnableCache) { lock (_cacheLock) _cache[cacheKey] = (retryChat, DateTime.Now.AddMinutes(cfg.CacheTtlMinutes)); }
                     Poke(retryChat); return;
                 }
@@ -427,18 +425,18 @@ public class SmartWebSearch(
                     var errMsg = errNode?["message"]?.GetValue<string>() ?? "";
                     if (errCode == 216003 || errMsg.Contains("quota", StringComparison.OrdinalIgnoreCase)
                         || errMsg.Contains("limit", StringComparison.OrdinalIgnoreCase))
-                    { Log($"智能搜索生成 账号{idx + 1}额度异常(code={errCode})"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                    Log($"智能搜索生成 请求失败({(int)resp.StatusCode}): {errMsg}"); continue;
+                    { Log($"鏅鸿兘鎼滅储鐢熸垚 璐﹀彿{idx + 1}棰濆害寮傚父(code={errCode})"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
+                    Log($"鏅鸿兘鎼滅储鐢熸垚 璇锋眰澶辫触({(int)resp.StatusCode}): {errMsg}"); continue;
                 }
                 var formatted = FormatChatSearchResults(raw, query);
-                Log($"智能搜索生成[{idx + 1}]成功");
+                Log($"鏅鸿兘鎼滅储鐢熸垚[{idx + 1}]鎴愬姛");
                 if (cfg.EnableCache) { lock (_cacheLock) _cache[cacheKey] = (formatted, DateTime.Now.AddMinutes(cfg.CacheTtlMinutes)); }
                 Poke(formatted); return;
             }
-            catch (TaskCanceledException) { Log($"智能搜索生成 账号{idx + 1}超时"); continue; }
-            catch (Exception ex) { Log($"智能搜索生成 账号{idx + 1}异常: {ex.Message}"); continue; }
+            catch (TaskCanceledException) { Log($"鏅鸿兘鎼滅储鐢熸垚 璐﹀彿{idx + 1}瓒呮椂"); continue; }
+            catch (Exception ex) { Log($"鏅鸿兘鎼滅储鐢熸垚 璐﹀彿{idx + 1}寮傚父: {ex.Message}"); continue; }
         }
-        Poke("智能搜索生成失败，所有百度账号均不可用。可尝试使用普通搜索(Search)");
+        Poke("鏅鸿兘鎼滅储鐢熸垚澶辫触锛屾墍鏈夌櫨搴﹁处鍙峰潎涓嶅彲鐢ㄣ€傚彲灏濊瘯浣跨敤鏅€氭悳绱?Search)");
     }
 
     static string FormatChatSearchResults(string rawJson, string query)
@@ -453,13 +451,13 @@ public class SmartWebSearch(
                 var message = choices[0]?["message"];
                 var reasoning = message?["reasoning_content"]?.GetValue<string>();
                 var content = message?["content"]?.GetValue<string>();
-                if (!string.IsNullOrWhiteSpace(reasoning)) { sb.AppendLine("## 推理过程"); sb.AppendLine(reasoning); sb.AppendLine(); }
-                if (!string.IsNullOrWhiteSpace(content)) { sb.AppendLine("## AI回答"); sb.AppendLine(content); sb.AppendLine(); }
+                if (!string.IsNullOrWhiteSpace(reasoning)) { sb.AppendLine("## 鎺ㄧ悊杩囩▼"); sb.AppendLine(reasoning); sb.AppendLine(); }
+                if (!string.IsNullOrWhiteSpace(content)) { sb.AppendLine("## AI鍥炵瓟"); sb.AppendLine(content); sb.AppendLine(); }
             }
             var followups = node?["followup_queries"]?.AsArray();
             if (followups != null && followups.Count > 0)
             {
-                sb.AppendLine("## 追问建议");
+                sb.AppendLine("## 杩介棶寤鸿");
                 int n = 1;
                 foreach (var f in followups)
                 {
@@ -471,7 +469,7 @@ public class SmartWebSearch(
             var refs = node?["references"]?.AsArray();
             if (refs != null && refs.Count > 0)
             {
-                sb.AppendLine($"## 参考来源（共 {refs.Count} 条）");
+                sb.AppendLine($"## 鍙傝€冩潵婧愶紙鍏?{refs.Count} 鏉★級");
                 int n = 1;
                 foreach (var r in refs)
                 {
@@ -481,32 +479,32 @@ public class SmartWebSearch(
                     n++;
                 }
             }
-            if (sb.Length == 0) sb.AppendLine("智能搜索生成完成但未返回有效内容");
+            if (sb.Length == 0) sb.AppendLine("鏅鸿兘鎼滅储鐢熸垚瀹屾垚浣嗘湭杩斿洖鏈夋晥鍐呭");
             return sb.ToString().Trim();
         }
-        catch (Exception ex) { Log($"智能搜索生成 格式化异常: {ex.Message}"); return $"智能搜索生成完成但结果解析失败:\n{rawJson}"; }
+        catch (Exception ex) { Log($"鏅鸿兘鎼滅储鐢熸垚 鏍煎紡鍖栧紓甯? {ex.Message}"); return $"鏅鸿兘鎼滅储鐢熸垚瀹屾垚浣嗙粨鏋滆В鏋愬け璐?\n{rawJson}"; }
     }
 
     #endregion
 
-    #region 百度热搜
+    #region 鐧惧害鐑悳
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("百度热搜：获取百度实时热搜榜单，支持9个垂直分类。当用户想看热搜、今日热点时使用。")]
+    [Description("鐧惧害鐑悳锛氳幏鍙栫櫨搴﹀疄鏃剁儹鎼滄鍗曪紝鏀寔9涓瀭鐩村垎绫汇€傚綋鐢ㄦ埛鎯崇湅鐑悳銆佷粖鏃ョ儹鐐规椂浣跨敤銆?)]
     public async Task HotSearch(
-        [Description("热搜分类：livelihood(民生) / finance(财经) / sports(体育) / new_entertainment(娱乐) / internation_news(国际) / challenge(挑战) / movie(电影) / teleplay(电视剧) / novel(小说)")] string tab = "livelihood",
-        [Description("返回结果数量，默认10，最多50")] int? maxResults = null)
+        [Description("鐑悳鍒嗙被锛歭ivelihood(姘戠敓) / finance(璐㈢粡) / sports(浣撹偛) / new_entertainment(濞变箰) / internation_news(鍥介檯) / challenge(鎸戞垬) / movie(鐢靛奖) / teleplay(鐢佃鍓? / novel(灏忚)")] string tab = "livelihood",
+        [Description("杩斿洖缁撴灉鏁伴噺锛岄粯璁?0锛屾渶澶?0")] int? maxResults = null)
     {
         var cfg = Configuration ?? new SmartWebSearchConfig();
         var baiduKeys = GetBaiduKeys(cfg);
-        if (!baiduKeys.Any(k => !string.IsNullOrWhiteSpace(k))) { Poke("百度热搜需要百度千帆API Key"); return; }
+        if (!baiduKeys.Any(k => !string.IsNullOrWhiteSpace(k))) { Poke("鐧惧害鐑悳闇€瑕佺櫨搴﹀崈甯咥PI Key"); return; }
         var validTabs = new[] { "livelihood", "finance", "sports", "new_entertainment", "internation_news", "challenge", "movie", "teleplay", "novel" };
-        if (!validTabs.Contains(tab)) { Poke($"无效分类: {tab}，可选: {string.Join(", ", validTabs)}"); return; }
+        if (!validTabs.Contains(tab)) { Poke($"鏃犳晥鍒嗙被: {tab}锛屽彲閫? {string.Join(", ", validTabs)}"); return; }
         var results = Math.Clamp(maxResults ?? 10, 1, 50);
         var url = $"{BaiduTrendingUrl}?tab={tab}";
         var cacheKey = $"hot:{tab}:{results}";
         if (cfg.EnableCache)
-        { lock (_cacheLock) { if (_cache.TryGetValue(cacheKey, out var cached) && cached.expiry > DateTime.Now) { Log($"缓存命中(热搜): {tab}"); Poke(cached.result); return; } } }
+        { lock (_cacheLock) { if (_cache.TryGetValue(cacheKey, out var cached) && cached.expiry > DateTime.Now) { Log($"缂撳瓨鍛戒腑(鐑悳): {tab}"); Poke(cached.result); return; } } }
         lock (_lock) _exhaustedBaidu.Clear();
 
         for (int attempt = 0; attempt < baiduKeys.Count; attempt++)
@@ -515,16 +513,16 @@ public class SmartWebSearch(
             if (key == null) break;
             try
             {
-                Log($"热搜[{idx + 1}] tab={tab} results={results}");
+                Log($"鐑悳[{idx + 1}] tab={tab} results={results}");
                 using var req = new HttpRequestMessage(HttpMethod.Get, url);
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
                 using var resp = await _http.SendAsync(req);
                 var raw = await resp.Content.ReadAsStringAsync();
                 if ((int)resp.StatusCode == 401 || (int)resp.StatusCode == 403)
-                { Log($"热搜 账号{idx + 1}认证失败"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
+                { Log($"鐑悳 璐﹀彿{idx + 1}璁よ瘉澶辫触"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
                 if ((int)resp.StatusCode == 429)
                 {
-                    Log($"热搜 账号{idx + 1}频率限制，等待2秒重试");
+                    Log($"鐑悳 璐﹀彿{idx + 1}棰戠巼闄愬埗锛岀瓑寰?绉掗噸璇?);
                     await Task.Delay(2000);
                     using var req2 = new HttpRequestMessage(HttpMethod.Get, url);
                     req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
@@ -534,10 +532,10 @@ public class SmartWebSearch(
                     {
                         if ((int)resp2.StatusCode == 401 || (int)resp2.StatusCode == 403)
                         { lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                        Log($"热搜 重试失败({(int)resp2.StatusCode})"); continue;
+                        Log($"鐑悳 閲嶈瘯澶辫触({(int)resp2.StatusCode})"); continue;
                     }
                     var retryHot = FormatHotSearchResults(raw, tab, results);
-                    Log($"热搜[{idx + 1}]成功(重试)");
+                    Log($"鐑悳[{idx + 1}]鎴愬姛(閲嶈瘯)");
                     if (cfg.EnableCache) { lock (_cacheLock) _cache[cacheKey] = (retryHot, DateTime.Now.AddMinutes(cfg.CacheTtlMinutes)); }
                     Poke(retryHot); return;
                 }
@@ -547,18 +545,18 @@ public class SmartWebSearch(
                     var errCode = errNode?["code"]?.GetValue<long>();
                     var errMsg = errNode?["message"]?.GetValue<string>() ?? "";
                     if (errCode == 216003 || errMsg.Contains("quota", StringComparison.OrdinalIgnoreCase))
-                    { Log($"热搜 账号{idx + 1}额度异常(code={errCode})"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                    Log($"热搜 请求失败({(int)resp.StatusCode}): {errMsg}"); continue;
+                    { Log($"鐑悳 璐﹀彿{idx + 1}棰濆害寮傚父(code={errCode})"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
+                    Log($"鐑悳 璇锋眰澶辫触({(int)resp.StatusCode}): {errMsg}"); continue;
                 }
                 var formatted = FormatHotSearchResults(raw, tab, results);
-                Log($"热搜[{idx + 1}]成功");
+                Log($"鐑悳[{idx + 1}]鎴愬姛");
                 if (cfg.EnableCache) { lock (_cacheLock) _cache[cacheKey] = (formatted, DateTime.Now.AddMinutes(cfg.CacheTtlMinutes)); }
                 Poke(formatted); return;
             }
-            catch (TaskCanceledException) { Log($"热搜 账号{idx + 1}超时"); continue; }
-            catch (Exception ex) { Log($"热搜 账号{idx + 1}异常: {ex.Message}"); continue; }
+            catch (TaskCanceledException) { Log($"鐑悳 璐﹀彿{idx + 1}瓒呮椂"); continue; }
+            catch (Exception ex) { Log($"鐑悳 璐﹀彿{idx + 1}寮傚父: {ex.Message}"); continue; }
         }
-        Poke("百度热搜获取失败，所有百度账号均不可用");
+        Poke("鐧惧害鐑悳鑾峰彇澶辫触锛屾墍鏈夌櫨搴﹁处鍙峰潎涓嶅彲鐢?);
     }
 
     static string FormatHotSearchResults(string rawJson, string tab, int maxResults)
@@ -568,14 +566,14 @@ public class SmartWebSearch(
             var node = JsonNode.Parse(rawJson);
             var sb = new StringBuilder();
             var tabNames = new Dictionary<string, string> {
-                {"livelihood","民生"},{"finance","财经"},{"sports","体育"},
-                {"new_entertainment","娱乐"},{"internation_news","国际"},
-                {"challenge","挑战"},{"movie","电影"},{"teleplay","电视剧"},{"novel","小说"}
+                {"livelihood","姘戠敓"},{"finance","璐㈢粡"},{"sports","浣撹偛"},
+                {"new_entertainment","濞变箰"},{"internation_news","鍥介檯"},
+                {"challenge","鎸戞垬"},{"movie","鐢靛奖"},{"teleplay","鐢佃鍓?},{"novel","灏忚"}
             };
             var tabName = tabNames.GetValueOrDefault(tab, tab);
             var data = node?["data"]?.AsArray();
-            if (data == null || data.Count == 0) { sb.AppendLine($"未获取到{tabName}热搜数据"); return sb.ToString().Trim(); }
-            sb.AppendLine($"## 百度{tabName}热搜（共 {Math.Min(data.Count, maxResults)} 条）");
+            if (data == null || data.Count == 0) { sb.AppendLine($"鏈幏鍙栧埌{tabName}鐑悳鏁版嵁"); return sb.ToString().Trim(); }
+            sb.AppendLine($"## 鐧惧害{tabName}鐑悳锛堝叡 {Math.Min(data.Count, maxResults)} 鏉★級");
             sb.AppendLine();
             int n = 1;
             foreach (var r in data)
@@ -588,40 +586,40 @@ public class SmartWebSearch(
                 var desc = r?["desc"]?.GetValue<string>() ?? "";
                 var url = r?["url"]?.GetValue<string>() ?? "";
                 var show = r?["show"]?.AsArray();
-                var changeIcon = hotChange switch { "up" => "↑", "down" => "↓", _ => "—" };
-                var tagStr = hotTag switch { 1 => "🆕新", 2 => "💰商", 3 => "🔥热", 4 => "♨️沸", 5 => "💥爆", _ => "" };
-                sb.AppendLine($"**{n}. {word}** {changeIcon} 热度:{hotScore} {tagStr}");
+                var changeIcon = hotChange switch { "up" => "鈫?, "down" => "鈫?, _ => "鈥? };
+                var tagStr = hotTag switch { 1 => "馃啎鏂?, 2 => "馃挵鍟?, 3 => "馃敟鐑?, 4 => "鈾笍娌?, 5 => "馃挜鐖?, _ => "" };
+                sb.AppendLine($"**{n}. {word}** {changeIcon} 鐑害:{hotScore} {tagStr}");
                 if (!string.IsNullOrWhiteSpace(desc)) sb.AppendLine($"   {desc}");
-                if (!string.IsNullOrWhiteSpace(url)) sb.AppendLine($"   链接: {url}");
+                if (!string.IsNullOrWhiteSpace(url)) sb.AppendLine($"   閾炬帴: {url}");
                 if (show != null && show.Count > 0)
                 {
                     var tags = show.Select(s => s?.GetValue<string>() ?? "").Where(s => !string.IsNullOrWhiteSpace(s));
-                    if (tags.Any()) sb.AppendLine($"   标签: {string.Join(", ", tags)}");
+                    if (tags.Any()) sb.AppendLine($"   鏍囩: {string.Join(", ", tags)}");
                 }
                 sb.AppendLine();
                 n++;
             }
             return sb.ToString().Trim();
         }
-        catch (Exception ex) { Log($"热搜 格式化异常: {ex.Message}"); return $"热搜获取完成但结果解析失败:\n{rawJson}"; }
+        catch (Exception ex) { Log($"鐑悳 鏍煎紡鍖栧紓甯? {ex.Message}"); return $"鐑悳鑾峰彇瀹屾垚浣嗙粨鏋滆В鏋愬け璐?\n{rawJson}"; }
     }
 
     #endregion
 
-    #region 智能识图
+    #region 鏅鸿兘璇嗗浘
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("智能识图：识别图片中的物体、场景、文字等。传入图片URL，插件自动下载并识别。当用户引用图片问\"这是什么\"时使用。")]
-    public async Task ImageRecognition([Description("图片URL地址")] string imageUrl)
+    [Description("鏅鸿兘璇嗗浘锛氳瘑鍒浘鐗囦腑鐨勭墿浣撱€佸満鏅€佹枃瀛楃瓑銆備紶鍏ュ浘鐗嘦RL锛屾彃浠惰嚜鍔ㄤ笅杞藉苟璇嗗埆銆傚綋鐢ㄦ埛寮曠敤鍥剧墖闂甛"杩欐槸浠€涔圽"鏃朵娇鐢ㄣ€?)]
+    public async Task ImageRecognition([Description("鍥剧墖URL鍦板潃")] string imageUrl)
     {
-        if (string.IsNullOrWhiteSpace(imageUrl)) { Poke("图片URL不能为空"); return; }
+        if (string.IsNullOrWhiteSpace(imageUrl)) { Poke("鍥剧墖URL涓嶈兘涓虹┖"); return; }
         var cfg = Configuration ?? new SmartWebSearchConfig();
         var baiduKeys = GetBaiduKeys(cfg);
-        if (!baiduKeys.Any(k => !string.IsNullOrWhiteSpace(k))) { Poke("智能识图需要百度千帆API Key"); return; }
+        if (!baiduKeys.Any(k => !string.IsNullOrWhiteSpace(k))) { Poke("鏅鸿兘璇嗗浘闇€瑕佺櫨搴﹀崈甯咥PI Key"); return; }
         lock (_lock) _exhaustedBaidu.Clear();
         string imageBase64;
-        try { Log("识图: 下载图片..."); imageBase64 = await DownloadImageAsBase64Async(imageUrl); Log($"识图: base64 {imageBase64.Length / 1024}KB"); }
-        catch (Exception ex) { Poke($"图片下载失败: {ex.Message}"); return; }
+        try { Log("璇嗗浘: 涓嬭浇鍥剧墖..."); imageBase64 = await DownloadImageAsBase64Async(imageUrl); Log($"璇嗗浘: base64 {imageBase64.Length / 1024}KB"); }
+        catch (Exception ex) { Poke($"鍥剧墖涓嬭浇澶辫触: {ex.Message}"); return; }
         var bodyJson = new JsonObject { ["image_b64"] = imageBase64 }.ToJsonString();
         for (int attempt = 0; attempt < baiduKeys.Count; attempt++)
         {
@@ -629,16 +627,16 @@ public class SmartWebSearch(
             if (key == null) break;
             try
             {
-                Log($"识图[{idx + 1}] 发送请求");
+                Log($"璇嗗浘[{idx + 1}] 鍙戦€佽姹?);
                 using var req = new HttpRequestMessage(HttpMethod.Post, BaiduImageRecognitionUrl);
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
                 req.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
                 using var resp = await _http.SendAsync(req);
                 var raw = await resp.Content.ReadAsStringAsync();
-                if ((int)resp.StatusCode == 401 || (int)resp.StatusCode == 403) { Log($"识图 账号{idx + 1}认证失败"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
+                if ((int)resp.StatusCode == 401 || (int)resp.StatusCode == 403) { Log($"璇嗗浘 璐﹀彿{idx + 1}璁よ瘉澶辫触"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
                 if ((int)resp.StatusCode == 429)
                 {
-                    Log($"识图 账号{idx + 1}频率限制，等待2秒重试"); await Task.Delay(2000);
+                    Log($"璇嗗浘 璐﹀彿{idx + 1}棰戠巼闄愬埗锛岀瓑寰?绉掗噸璇?); await Task.Delay(2000);
                     using var req2 = new HttpRequestMessage(HttpMethod.Post, BaiduImageRecognitionUrl);
                     req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
                     req2.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
@@ -646,22 +644,22 @@ public class SmartWebSearch(
                     if (!resp2.IsSuccessStatusCode)
                     {
                         if ((int)resp2.StatusCode == 401 || (int)resp2.StatusCode == 403) { lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                        Log($"识图 重试失败({(int)resp2.StatusCode})"); continue;
+                        Log($"璇嗗浘 閲嶈瘯澶辫触({(int)resp2.StatusCode})"); continue;
                     }
-                    var retryImg = FormatImageRecognitionResults(raw); Log($"识图[{idx + 1}]成功(重试)"); Poke(retryImg); return;
+                    var retryImg = FormatImageRecognitionResults(raw); Log($"璇嗗浘[{idx + 1}]鎴愬姛(閲嶈瘯)"); Poke(retryImg); return;
                 }
                 if (!resp.IsSuccessStatusCode)
                 {
                     var errNode = JsonNode.Parse(raw); var errCode = errNode?["code"]?.GetValue<long>(); var errMsg = errNode?["message"]?.GetValue<string>() ?? "";
-                    if (errCode == 216003 || errMsg.Contains("quota", StringComparison.OrdinalIgnoreCase)) { Log($"识图 账号{idx + 1}额度异常"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                    Log($"识图 请求失败({(int)resp.StatusCode}): {errMsg}"); continue;
+                    if (errCode == 216003 || errMsg.Contains("quota", StringComparison.OrdinalIgnoreCase)) { Log($"璇嗗浘 璐﹀彿{idx + 1}棰濆害寮傚父"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
+                    Log($"璇嗗浘 璇锋眰澶辫触({(int)resp.StatusCode}): {errMsg}"); continue;
                 }
-                var formatted = FormatImageRecognitionResults(raw); Log($"识图[{idx + 1}]成功"); Poke(formatted); return;
+                var formatted = FormatImageRecognitionResults(raw); Log($"璇嗗浘[{idx + 1}]鎴愬姛"); Poke(formatted); return;
             }
-            catch (TaskCanceledException) { Log($"识图 账号{idx + 1}超时"); continue; }
-            catch (Exception ex) { Log($"识图 账号{idx + 1}异常: {ex.Message}"); continue; }
+            catch (TaskCanceledException) { Log($"璇嗗浘 璐﹀彿{idx + 1}瓒呮椂"); continue; }
+            catch (Exception ex) { Log($"璇嗗浘 璐﹀彿{idx + 1}寮傚父: {ex.Message}"); continue; }
         }
-        Poke("智能识图失败，所有百度账号均不可用");
+        Poke("鏅鸿兘璇嗗浘澶辫触锛屾墍鏈夌櫨搴﹁处鍙峰潎涓嶅彲鐢?);
     }
 
     static string FormatImageRecognitionResults(string rawJson)
@@ -673,7 +671,7 @@ public class SmartWebSearch(
             if (choices != null && choices.Count > 0)
             {
                 var content = choices[0]?["message"]?["content"]?.GetValue<string>();
-                if (!string.IsNullOrWhiteSpace(content)) { sb.AppendLine("## 识别结果"); sb.AppendLine(content); }
+                if (!string.IsNullOrWhiteSpace(content)) { sb.AppendLine("## 璇嗗埆缁撴灉"); sb.AppendLine(content); }
             }
             if (sb.Length == 0)
             {
@@ -681,16 +679,16 @@ public class SmartWebSearch(
                 if (data != null)
                 {
                     var desc = data?["description"]?.GetValue<string>();
-                    if (!string.IsNullOrWhiteSpace(desc)) { sb.AppendLine("## 识别结果"); sb.AppendLine(desc); }
+                    if (!string.IsNullOrWhiteSpace(desc)) { sb.AppendLine("## 璇嗗埆缁撴灉"); sb.AppendLine(desc); }
                     var tags = data?["tags"]?.AsArray() ?? data?["result"]?.AsArray();
                     if (tags != null && tags.Count > 0)
                     {
-                        sb.AppendLine($"## 标签（共 {tags.Count} 个）"); int n = 1;
+                        sb.AppendLine($"## 鏍囩锛堝叡 {tags.Count} 涓級"); int n = 1;
                         foreach (var t in tags)
                         {
                             var name = t?["name"]?.GetValue<string>() ?? t?.GetValue<string>() ?? "";
                             var score = t?["score"]?.GetValue<double>() ?? 0;
-                            if (!string.IsNullOrWhiteSpace(name)) { sb.AppendLine($"{n}. {name} (置信度: {score:F2})"); n++; }
+                            if (!string.IsNullOrWhiteSpace(name)) { sb.AppendLine($"{n}. {name} (缃俊搴? {score:F2})"); n++; }
                         }
                     }
                 }
@@ -699,15 +697,15 @@ public class SmartWebSearch(
             {
                 var code = node?["code"]?.GetValue<string>() ?? "";
                 var msg = node?["message"]?.GetValue<string>() ?? "";
-                sb.AppendLine(code != "0" && !string.IsNullOrWhiteSpace(msg) ? $"识别失败: {msg}" : "识别完成但未返回有效内容");
+                sb.AppendLine(code != "0" && !string.IsNullOrWhiteSpace(msg) ? $"璇嗗埆澶辫触: {msg}" : "璇嗗埆瀹屾垚浣嗘湭杩斿洖鏈夋晥鍐呭");
             }
             return sb.ToString().Trim();
         }
-        catch (Exception ex) { Log($"识图 格式化异常: {ex.Message}"); return $"识图完成但结果解析失败:\n{rawJson}"; }
+        catch (Exception ex) { Log($"璇嗗浘 鏍煎紡鍖栧紓甯? {ex.Message}"); return $"璇嗗浘瀹屾垚浣嗙粨鏋滆В鏋愬け璐?\n{rawJson}"; }
     }
 
     /// <summary>
-    /// 下载图片并转为base64，超过100KB自动压缩
+    /// 涓嬭浇鍥剧墖骞惰浆涓篵ase64锛岃秴杩?00KB鑷姩鍘嬬缉
     /// </summary>
     static async Task<string> DownloadImageAsBase64Async(string imageUrl)
     {
@@ -717,7 +715,7 @@ public class SmartWebSearch(
         var base64 = Convert.ToBase64String(bytes);
         const int maxSize = 100 * 1024;
         if (base64.Length <= maxSize) return base64;
-        Log($"识图: base64 {base64.Length / 1024}KB 超限，压缩中");
+        Log($"璇嗗浘: base64 {base64.Length / 1024}KB 瓒呴檺锛屽帇缂╀腑");
         using var ms = new MemoryStream(bytes);
         using var img = Image.FromStream(ms);
         int width = img.Width, height = img.Height;
@@ -734,25 +732,25 @@ public class SmartWebSearch(
             bmp.Save(jpegMs, jpegCodec, jpegParams);
             var compressed = Convert.ToBase64String(jpegMs.ToArray());
             if (compressed.Length <= maxSize)
-            { Log($"识图: 压缩成功 {base64.Length / 1024}KB -> {compressed.Length / 1024}KB"); return compressed; }
+            { Log($"璇嗗浘: 鍘嬬缉鎴愬姛 {base64.Length / 1024}KB -> {compressed.Length / 1024}KB"); return compressed; }
             width = Math.Max(100, width / 2); height = Math.Max(100, height / 2);
-            if (width <= 100) { Log("识图: 压缩到极限"); return compressed; }
+            if (width <= 100) { Log("璇嗗浘: 鍘嬬缉鍒版瀬闄?); return compressed; }
         }
     }
 
     #endregion
 
-    #region 引擎路由逻辑
+    #region 寮曟搸璺敱閫昏緫
 
     /// <summary>
-    /// 根据参数、配置和查询语言确定搜索顺序
+    /// 鏍规嵁鍙傛暟銆侀厤缃拰鏌ヨ璇█纭畾鎼滅储椤哄簭
     /// </summary>
     static List<string> ResolveSearchOrder(string? engineParam, string configEngine,
         string query, bool hasTavily, bool hasBaidu)
     {
         var order = new List<string>();
 
-        // 1. AI显式指定引擎
+        // 1. AI鏄惧紡鎸囧畾寮曟搸
         if (!string.IsNullOrWhiteSpace(engineParam))
         {
             var e = engineParam.ToLower().Trim();
@@ -760,11 +758,11 @@ public class SmartWebSearch(
             if (e == "baidu" && hasBaidu) { order.Add("baidu"); return order; }
         }
 
-        // 2. 配置指定单引擎
+        // 2. 閰嶇疆鎸囧畾鍗曞紩鎿?
         if (configEngine == "tavily" && hasTavily) { order.Add("tavily"); return order; }
         if (configEngine == "baidu" && hasBaidu) { order.Add("baidu"); return order; }
 
-        // 3. auto 智能路由：按语言选主引擎，另一个作为备选
+        // 3. auto 鏅鸿兘璺敱锛氭寜璇█閫変富寮曟搸锛屽彟涓€涓綔涓哄閫?
         if (!hasTavily) { order.Add("baidu"); return order; }
         if (!hasBaidu) { order.Add("tavily"); return order; }
 
@@ -775,7 +773,7 @@ public class SmartWebSearch(
     }
 
     /// <summary>
-    /// 简单中文检测：中文字符占比超过30%视为中文查询
+    /// 绠€鍗曚腑鏂囨娴嬶細涓枃瀛楃鍗犳瘮瓒呰繃30%瑙嗕负涓枃鏌ヨ
     /// </summary>
     static bool IsChineseQuery(string query)
     {
@@ -785,7 +783,7 @@ public class SmartWebSearch(
 
     #endregion
 
-    #region Tavily 搜索
+    #region Tavily 鎼滅储
 
     async Task<string?> TryTavilySearch(string query, string depth, string? topic,
         string? timeRange, int results, List<string> keys)
@@ -816,18 +814,18 @@ public class SmartWebSearch(
                 using var resp = await _http.SendAsync(req);
                 var raw = await resp.Content.ReadAsStringAsync();
 
-                // 额度耗尽：432(Key/Plan Limit) / 433(PayGo Limit)
+                // 棰濆害鑰楀敖锛?32(Key/Plan Limit) / 433(PayGo Limit)
                 if ((int)resp.StatusCode == 432 || (int)resp.StatusCode == 433)
                 {
-                    Log($"Tavily 账号 {idx + 1} 额度耗尽 (HTTP {(int)resp.StatusCode})，切换下一个");
+                    Log($"Tavily 璐﹀彿 {idx + 1} 棰濆害鑰楀敖 (HTTP {(int)resp.StatusCode})锛屽垏鎹笅涓€涓?);
                     lock (_lock) _exhaustedTavily.Add(idx);
                     continue;
                 }
 
-                // 频率限制：等待后重试一次
+                // 棰戠巼闄愬埗锛氱瓑寰呭悗閲嶈瘯涓€娆?
                 if ((int)resp.StatusCode == 429)
                 {
-                    Log($"Tavily 账号 {idx + 1} 频率限制，等待2秒重试");
+                    Log($"Tavily 璐﹀彿 {idx + 1} 棰戠巼闄愬埗锛岀瓑寰?绉掗噸璇?);
                     await Task.Delay(2000);
                     using var req2 = new HttpRequestMessage(HttpMethod.Post, TavilyUrl);
                     req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
@@ -839,44 +837,44 @@ public class SmartWebSearch(
                     {
                         if ((int)resp2.StatusCode == 432 || (int)resp2.StatusCode == 433)
                         { lock (_lock) _exhaustedTavily.Add(idx); continue; }
-                        Log($"Tavily 重试失败 (HTTP {(int)resp2.StatusCode})");
+                        Log($"Tavily 閲嶈瘯澶辫触 (HTTP {(int)resp2.StatusCode})");
                         continue;
                     }
 
-                    // 重试成功，直接格式化返回
+                    // 閲嶈瘯鎴愬姛锛岀洿鎺ユ牸寮忓寲杩斿洖
                     var retryResult = FormatTavilyResults(raw, query);
-                    Log($"Tavily [{idx + 1}] 搜索成功（重试）");
+                    Log($"Tavily [{idx + 1}] 鎼滅储鎴愬姛锛堥噸璇曪級");
                     return retryResult;
                 }
 
-                // Key无效
+                // Key鏃犳晥
                 if ((int)resp.StatusCode == 401)
                 {
-                    Log($"Tavily 账号 {idx + 1} Key无效 (401)，切换下一个");
+                    Log($"Tavily 璐﹀彿 {idx + 1} Key鏃犳晥 (401)锛屽垏鎹笅涓€涓?);
                     lock (_lock) _exhaustedTavily.Add(idx);
                     continue;
                 }
 
-                // 服务端错误
+                // 鏈嶅姟绔敊璇?
                 if ((int)resp.StatusCode >= 500)
                 {
-                    Log($"Tavily 服务端错误 (HTTP {(int)resp.StatusCode})");
+                    Log($"Tavily 鏈嶅姟绔敊璇?(HTTP {(int)resp.StatusCode})");
                     continue;
                 }
 
                 if (!resp.IsSuccessStatusCode)
                 {
-                    Log($"Tavily 请求失败 (HTTP {(int)resp.StatusCode}): {raw[..Math.Min(200, raw.Length)]}");
+                    Log($"Tavily 璇锋眰澶辫触 (HTTP {(int)resp.StatusCode}): {raw[..Math.Min(200, raw.Length)]}");
                     continue;
                 }
 
-                // 成功
+                // 鎴愬姛
                 var formatted = FormatTavilyResults(raw, query);
-                Log($"Tavily [{idx + 1}] 搜索成功");
+                Log($"Tavily [{idx + 1}] 鎼滅储鎴愬姛");
                 return formatted;
             }
-            catch (TaskCanceledException) { Log($"Tavily 账号 {idx + 1} 超时"); continue; }
-            catch (Exception ex) { Log($"Tavily 账号 {idx + 1} 异常: {ex.Message}"); continue; }
+            catch (TaskCanceledException) { Log($"Tavily 璐﹀彿 {idx + 1} 瓒呮椂"); continue; }
+            catch (Exception ex) { Log($"Tavily 璐﹀彿 {idx + 1} 寮傚父: {ex.Message}"); continue; }
         }
 
         return null;
@@ -892,7 +890,7 @@ public class SmartWebSearch(
             var answer = node?["answer"]?.GetValue<string>();
             if (!string.IsNullOrWhiteSpace(answer))
             {
-                sb.AppendLine("## 搜索摘要");
+                sb.AppendLine("## 鎼滅储鎽樿");
                 sb.AppendLine(answer);
                 sb.AppendLine();
             }
@@ -900,7 +898,7 @@ public class SmartWebSearch(
             var results = node?["results"]?.AsArray();
             if (results != null && results.Count > 0)
             {
-                sb.AppendLine($"## 搜索结果（共 {results.Count} 条）");
+                sb.AppendLine($"## 鎼滅储缁撴灉锛堝叡 {results.Count} 鏉★級");
                 sb.AppendLine();
                 int n = 1;
                 foreach (var r in results)
@@ -910,35 +908,35 @@ public class SmartWebSearch(
                     var content = r?["content"]?.GetValue<string>() ?? "";
                     var score = r?["score"]?.GetValue<float>() ?? 0;
                     sb.AppendLine($"### {n}. {title}");
-                    sb.AppendLine($"链接: {url}");
-                    sb.AppendLine($"相关度: {score:F2}");
+                    sb.AppendLine($"閾炬帴: {url}");
+                    sb.AppendLine($"鐩稿叧搴? {score:F2}");
                     sb.AppendLine(content);
                     sb.AppendLine();
                     n++;
                 }
             }
-            else sb.AppendLine("未找到相关搜索结果");
+            else sb.AppendLine("鏈壘鍒扮浉鍏虫悳绱㈢粨鏋?);
 
             return sb.ToString().Trim();
         }
         catch (Exception ex)
         {
-            Log($"Tavily 格式化异常: {ex.Message}");
-            return $"搜索完成但结果解析失败:\n{rawJson}";
+            Log($"Tavily 鏍煎紡鍖栧紓甯? {ex.Message}");
+            return $"鎼滅储瀹屾垚浣嗙粨鏋滆В鏋愬け璐?\n{rawJson}";
         }
     }
 
     #endregion
 
-    #region 百度搜索
+    #region 鐧惧害鎼滅储
 
     async Task<string?> TryBaiduSearch(string query, string depth, string? timeRange,
         int results, bool? includeImages, bool? includeVideos, List<string> keys)
     {
-        // 百度query限制72字符（汉字算2字符）
+        // 鐧惧害query闄愬埗72瀛楃锛堟眽瀛楃畻2瀛楃锛?
         var truncatedQuery = TruncateForBaidu(query);
 
-        // 构建请求体
+        // 鏋勫缓璇锋眰浣?
         var resourceFilter = new JsonArray
         {
             new JsonObject { ["type"] = "web", ["top_k"] = results }
@@ -958,10 +956,10 @@ public class SmartWebSearch(
             ["resource_type_filter"] = resourceFilter,
         };
 
-        // 深度映射: basic→lite(快速), advanced→standard(完整)
+        // 娣卞害鏄犲皠: basic鈫抣ite(蹇€?, advanced鈫抯tandard(瀹屾暣)
         body["edition"] = depth == "advanced" ? "standard" : "lite";
 
-        // 时间范围映射: day→week(百度最小week), week→week, month→month, year→year
+        // 鏃堕棿鑼冨洿鏄犲皠: day鈫抴eek(鐧惧害鏈€灏弚eek), week鈫抴eek, month鈫抦onth, year鈫抷ear
         if (!string.IsNullOrWhiteSpace(timeRange))
         {
             var recency = timeRange switch
@@ -984,7 +982,7 @@ public class SmartWebSearch(
 
             try
             {
-                Log($"百度 [{idx + 1}] edition={body["edition"]} results={results}");
+                Log($"鐧惧害 [{idx + 1}] edition={body["edition"]} results={results}");
                 using var req = new HttpRequestMessage(HttpMethod.Post, BaiduUrl);
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
                 req.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
@@ -992,18 +990,18 @@ public class SmartWebSearch(
                 using var resp = await _http.SendAsync(req);
                 var raw = await resp.Content.ReadAsStringAsync();
 
-                // 百度认证错误: code=216003
+                // 鐧惧害璁よ瘉閿欒: code=216003
                 if ((int)resp.StatusCode == 401 || (int)resp.StatusCode == 403)
                 {
-                    Log($"百度 账号 {idx + 1} 认证失败 (HTTP {(int)resp.StatusCode})，切换下一个");
+                    Log($"鐧惧害 璐﹀彿 {idx + 1} 璁よ瘉澶辫触 (HTTP {(int)resp.StatusCode})锛屽垏鎹笅涓€涓?);
                     lock (_lock) _exhaustedBaidu.Add(idx);
                     continue;
                 }
 
-                // 频率限制
+                // 棰戠巼闄愬埗
                 if ((int)resp.StatusCode == 429)
                 {
-                    Log($"百度 账号 {idx + 1} 频率限制，等待2秒重试");
+                    Log($"鐧惧害 璐﹀彿 {idx + 1} 棰戠巼闄愬埗锛岀瓑寰?绉掗噸璇?);
                     await Task.Delay(2000);
                     using var req2 = new HttpRequestMessage(HttpMethod.Post, BaiduUrl);
                     req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
@@ -1015,44 +1013,44 @@ public class SmartWebSearch(
                     {
                         if ((int)resp2.StatusCode == 401 || (int)resp2.StatusCode == 403)
                         { lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                        Log($"百度 重试失败 (HTTP {(int)resp2.StatusCode})");
+                        Log($"鐧惧害 閲嶈瘯澶辫触 (HTTP {(int)resp2.StatusCode})");
                         continue;
                     }
 
-                    // 重试成功，直接格式化返回
+                    // 閲嶈瘯鎴愬姛锛岀洿鎺ユ牸寮忓寲杩斿洖
                     var retryResult = FormatBaiduResults(raw, query);
-                    Log($"百度 [{idx + 1}] 搜索成功（重试）");
+                    Log($"鐧惧害 [{idx + 1}] 鎼滅储鎴愬姛锛堥噸璇曪級");
                     return retryResult;
                 }
 
-                // 检查响应体中的错误码（额度耗尽等）
+                // 妫€鏌ュ搷搴斾綋涓殑閿欒鐮侊紙棰濆害鑰楀敖绛夛級
                 if (!resp.IsSuccessStatusCode)
                 {
-                    // 尝试解析错误码
+                    // 灏濊瘯瑙ｆ瀽閿欒鐮?
                     var errNode = JsonNode.Parse(raw);
                     var errCode = errNode?["code"]?.GetValue<long>();
                     var errMsg = errNode?["message"]?.GetValue<string>() ?? "";
 
-                    // 216003=认证错误, 其他quota相关错误码也视为账号耗尽
+                    // 216003=璁よ瘉閿欒, 鍏朵粬quota鐩稿叧閿欒鐮佷篃瑙嗕负璐﹀彿鑰楀敖
                     if (errCode == 216003 || errMsg.Contains("quota", StringComparison.OrdinalIgnoreCase)
                         || errMsg.Contains("limit", StringComparison.OrdinalIgnoreCase))
                     {
-                        Log($"百度 账号 {idx + 1} 额度/认证异常 (code={errCode})，切换下一个");
+                        Log($"鐧惧害 璐﹀彿 {idx + 1} 棰濆害/璁よ瘉寮傚父 (code={errCode})锛屽垏鎹笅涓€涓?);
                         lock (_lock) _exhaustedBaidu.Add(idx);
                         continue;
                     }
 
-                    Log($"百度 请求失败 (HTTP {(int)resp.StatusCode}): {errMsg}");
+                    Log($"鐧惧害 璇锋眰澶辫触 (HTTP {(int)resp.StatusCode}): {errMsg}");
                     continue;
                 }
 
-                // 成功
+                // 鎴愬姛
                 var formatted = FormatBaiduResults(raw, query);
-                Log($"百度 [{idx + 1}] 搜索成功");
+                Log($"鐧惧害 [{idx + 1}] 鎼滅储鎴愬姛");
                 return formatted;
             }
-            catch (TaskCanceledException) { Log($"百度 账号 {idx + 1} 超时"); continue; }
-            catch (Exception ex) { Log($"百度 账号 {idx + 1} 异常: {ex.Message}"); continue; }
+            catch (TaskCanceledException) { Log($"鐧惧害 璐﹀彿 {idx + 1} 瓒呮椂"); continue; }
+            catch (Exception ex) { Log($"鐧惧害 璐﹀彿 {idx + 1} 寮傚父: {ex.Message}"); continue; }
         }
 
         return null;
@@ -1068,11 +1066,11 @@ public class SmartWebSearch(
             var refs = node?["references"]?.AsArray();
             if (refs == null || refs.Count == 0)
             {
-                sb.AppendLine("未找到相关搜索结果");
+                sb.AppendLine("鏈壘鍒扮浉鍏虫悳绱㈢粨鏋?);
                 return sb.ToString().Trim();
             }
 
-            // 分离网页结果和多媒体结果
+            // 鍒嗙缃戦〉缁撴灉鍜屽濯掍綋缁撴灉
             var webResults = new List<JsonNode?>();
             var imageResults = new List<JsonNode?>();
             var videoResults = new List<JsonNode?>();
@@ -1088,10 +1086,10 @@ public class SmartWebSearch(
                 }
             }
 
-            // 格式化网页结果
+            // 鏍煎紡鍖栫綉椤电粨鏋?
             if (webResults.Count > 0)
             {
-                sb.AppendLine($"## 搜索结果（共 {webResults.Count} 条）");
+                sb.AppendLine($"## 鎼滅储缁撴灉锛堝叡 {webResults.Count} 鏉★級");
                 sb.AppendLine();
                 int n = 1;
                 foreach (var r in webResults)
@@ -1105,21 +1103,21 @@ public class SmartWebSearch(
 
                     sb.AppendLine($"### {n}. {title}");
                     if (!string.IsNullOrWhiteSpace(date))
-                        sb.AppendLine($"发布时间: {date}");
-                    sb.AppendLine($"链接: {url}");
-                    sb.AppendLine($"相关度: {score:F2}");
+                        sb.AppendLine($"鍙戝竷鏃堕棿: {date}");
+                    sb.AppendLine($"閾炬帴: {url}");
+                    sb.AppendLine($"鐩稿叧搴? {score:F2}");
                     if (authority >= 0)
-                        sb.AppendLine($"权威性: {authority:F2}");
+                        sb.AppendLine($"鏉冨▉鎬? {authority:F2}");
                     sb.AppendLine(content);
                     sb.AppendLine();
                     n++;
                 }
             }
 
-            // 格式化图片结果
+            // 鏍煎紡鍖栧浘鐗囩粨鏋?
             if (imageResults.Count > 0)
             {
-                sb.AppendLine($"## 图片结果（共 {imageResults.Count} 张）");
+                sb.AppendLine($"## 鍥剧墖缁撴灉锛堝叡 {imageResults.Count} 寮狅級");
                 int n = 1;
                 foreach (var r in imageResults)
                 {
@@ -1127,16 +1125,16 @@ public class SmartWebSearch(
                     var imgUrl = img?["url"]?.GetValue<string>() ?? "";
                     var w = img?["width"]?.GetValue<string>() ?? "";
                     var h = img?["height"]?.GetValue<string>() ?? "";
-                    sb.AppendLine($"{n}. [图片]({imgUrl}) {w}x{h}");
+                    sb.AppendLine($"{n}. [鍥剧墖]({imgUrl}) {w}x{h}");
                     n++;
                 }
                 sb.AppendLine();
             }
 
-            // 格式化视频结果
+            // 鏍煎紡鍖栬棰戠粨鏋?
             if (videoResults.Count > 0)
             {
-                sb.AppendLine($"## 视频结果（共 {videoResults.Count} 个）");
+                sb.AppendLine($"## 瑙嗛缁撴灉锛堝叡 {videoResults.Count} 涓級");
                 int n = 1;
                 foreach (var r in videoResults)
                 {
@@ -1144,7 +1142,7 @@ public class SmartWebSearch(
                     var vidUrl = vid?["url"]?.GetValue<string>() ?? "";
                     var duration = vid?["duration"]?.GetValue<string>() ?? "";
                     var title = r?["title"]?.GetValue<string>() ?? "";
-                    sb.AppendLine($"{n}. [{title}]({vidUrl}) 时长:{duration}秒");
+                    sb.AppendLine($"{n}. [{title}]({vidUrl}) 鏃堕暱:{duration}绉?);
                     n++;
                 }
                 sb.AppendLine();
@@ -1154,13 +1152,13 @@ public class SmartWebSearch(
         }
         catch (Exception ex)
         {
-            Log($"百度 格式化异常: {ex.Message}");
-            return $"搜索完成但结果解析失败:\n{rawJson}";
+            Log($"鐧惧害 鏍煎紡鍖栧紓甯? {ex.Message}");
+            return $"鎼滅储瀹屾垚浣嗙粨鏋滆В鏋愬け璐?\n{rawJson}";
         }
     }
 
     /// <summary>
-    /// 百度query截断：72字符限制（汉字算2字符）
+    /// 鐧惧害query鎴柇锛?2瀛楃闄愬埗锛堟眽瀛楃畻2瀛楃锛?
     /// </summary>
     static string TruncateForBaidu(string query)
     {
@@ -1175,13 +1173,13 @@ public class SmartWebSearch(
         }
         var result = sb.ToString();
         if (result.Length < query.Length)
-            Log($"百度query截断: {query.Length} → {result.Length} 字符");
+            Log($"鐧惧害query鎴柇: {query.Length} 鈫?{result.Length} 瀛楃");
         return result;
     }
 
     #endregion
 
-    #region 辅助方法
+    #region 杈呭姪鏂规硶
 
     (int index, string? key) GetNextKey(List<string> keys, HashSet<int> exhausted)
     {
