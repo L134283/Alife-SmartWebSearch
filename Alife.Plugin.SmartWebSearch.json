@@ -26,6 +26,11 @@
       "date": "2026-07-02",
       "note": "多功能AI搜索：AI总结搜索(高性能版) + 智能搜索生成(标准版) + 双引擎搜索(Tavily+百度) + 百度热搜 + 智能识图，智能路由，多账号轮换，图片自动压缩，结果缓存",
       "file": "https://github.com/L134283/Alife-SmartWebSearch/releases/download/SmartWebSearch-v1.0.0/Alife.Plugin.SmartWebSearch.zip"
+    },
+    "1.0.1": {
+      "date": "2026-07-04",
+      "note": "修复：System.Drawing.Common 版本兼容性(9.0.0→>=9.0.0)；修复系统提示词函数文档重复注入",
+      "file": "https://github.com/L134283/Alife-SmartWebSearch/releases/download/SmartWebSearch-v1.0.1/Alife.Plugin.SmartWebSearch.zip"
     }
   }
 }
