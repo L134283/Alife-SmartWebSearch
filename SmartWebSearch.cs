@@ -76,24 +76,14 @@ public class SmartWebSearch(
             _ => $"智能路由（Tavily {tCount} 个 + 百度 {bCount} 个）"
         };
 
+        // 仅注入策略与运行时配置；函数能力说明由 [Description] 自动注入，不再重复
         Prompt($$"""
-            ## 网络搜索能力
-            以下情况请主动使用搜索：用户要求搜索、遇到不确定/可能过时的知识、需要最新信息或事实核查。
-
-            ### 工具优先级（百度渠道）
-            1. **SmartSummary（AI总结搜索）** — 默认首选。搜索+大模型总结一步到位，100次/日。
-            2. **SmartChatSearch（智能搜索生成）** — SmartSummary失败时降级。功能最全面，支持可选深度搜索（耗费较多额度）。
-            3. **Search（普通搜索）** — AI搜索均失败时最终降级。双引擎智能路由(Tavily+百度)。
-            4. **HotSearch（百度热搜）** — 用户想看热搜/今日热点时使用。9个垂直分类。
-            5. **ImageRecognition（智能识图）** — 用户引用图片问"这是什么"时使用。传入图片URL。
-
-            ### 使用规则
-            - "搜一下"/"搜索" → SmartSummary → 失败则 SmartChatSearch → 再失败则 Search
-            - "看热搜"/"今天热点" → HotSearch
-            - 引用图片问"这是什么" → ImageRecognition
-
-            当前引擎配置：{{engineDesc}}
-            Search双引擎：中文→百度(中文强,支持图片/视频)，英文→Tavily(有AI摘要,英文强)，可通过engine参数指定
+            ## 网络搜索
+            主动搜索时机：用户要求、不确定/可能过时的知识、需要最新信息或事实核查。
+            工具级联：SmartSummary → SmartChatSearch → Search（前者失败再降级）。
+            HotSearch 用于热搜/今日热点；ImageRecognition 用于引用图片问"这是什么"（传图片URL）。
+            当前引擎：{{engineDesc}}
+            Search双引擎：中文→百度(中文强,支持图片/视频)，英文→Tavily(有AI摘要,英文强)，可用engine参数指定
 
             """);
     }
@@ -114,11 +104,7 @@ public class SmartWebSearch(
         [Description("是否包含图片结果（仅百度）")] bool? includeImages = null,
         [Description("是否包含视频结果（仅百度）")] bool? includeVideos = null)
     {
-        if (string.IsNullOrWhiteSpace(query))
-        {
-            Poke("搜索关键词不能为空");
-            return;
-        }
+        if (string.IsNullOrWhiteSpace(query)) { Poke("搜索关键词不能为空"); return; }
 
         var cfg = Configuration ?? new SmartWebSearchConfig();
         var tavilyKeys = GetTavilyKeys(cfg);
@@ -126,67 +112,35 @@ public class SmartWebSearch(
         var hasTavily = tavilyKeys.Any(k => !string.IsNullOrWhiteSpace(k));
         var hasBaidu = baiduKeys.Any(k => !string.IsNullOrWhiteSpace(k));
 
-        if (!hasTavily && !hasBaidu)
-        {
-            Poke("未配置任何搜索引擎的 API Key，请在插件设置中填写");
-            return;
-        }
+        if (!hasTavily && !hasBaidu) { Poke("未配置任何搜索引擎的 API Key，请在插件设置中填写"); return; }
 
         var depth = string.IsNullOrWhiteSpace(searchDepth) ? cfg.SearchDepth : searchDepth;
         var results = Math.Clamp(maxResults ?? cfg.MaxResults, 1, 20);
 
-        // 缓存检查
-        var cacheKey = $"{engine}:{query}:{depth}:{results}:{topic}:{timeRange}:{includeImages}:{includeVideos}";
-        if (cfg.EnableCache)
+        var cacheKey = $"search:{engine}:{query}:{depth}:{results}:{topic}:{timeRange}:{includeImages}:{includeVideos}";
+        if (TryGetCached(cfg, cacheKey, out var cachedResult))
         {
-            lock (_cacheLock)
-            {
-                if (_cache.TryGetValue(cacheKey, out var cached) && cached.expiry > DateTime.Now)
-                {
-                    Log($"缓存命中: {query[..Math.Min(30, query.Length)]}...");
-                    Poke(cached.result);
-                    return;
-                }
-            }
+            Log($"缓存命中: {query[..Math.Min(30, query.Length)]}...");
+            Poke(cachedResult);
+            return;
         }
 
-        // 清空已耗尽标记（每次新搜索重新尝试，额度可能已刷新）
         lock (_lock) { _exhaustedTavily.Clear(); _exhaustedBaidu.Clear(); }
 
-        // 确定搜索顺序
         var searchOrder = ResolveSearchOrder(engine, cfg.Engine, query, hasTavily, hasBaidu);
 
         string? result = null;
         foreach (var eng in searchOrder)
         {
             if (eng == "tavily" && hasTavily)
-                result = await TryTavilySearch(query, depth, topic, timeRange, results, tavilyKeys);
+                result = await TryTavilySearch(query, depth, topic, timeRange, results, cacheKey, cfg);
             else if (eng == "baidu" && hasBaidu)
-                result = await TryBaiduSearch(query, depth, timeRange, results, includeImages, includeVideos, baiduKeys);
+                result = await TryBaiduSearch(query, depth, timeRange, results, includeImages, includeVideos, cacheKey, cfg);
 
             if (result != null) break;
         }
 
-        if (result == null)
-        {
-            Poke("所有搜索引擎均不可用，请检查 API Key 配置或等待额度刷新");
-            return;
-        }
-
-        // 写入缓存
-        if (cfg.EnableCache)
-        {
-            lock (_cacheLock)
-            {
-                _cache[cacheKey] = (result, DateTime.Now.AddMinutes(cfg.CacheTtlMinutes));
-                if (_cache.Count > 100)
-                {
-                    var expired = _cache.Where(k => k.Value.expiry <= DateTime.Now)
-                        .Select(k => k.Key).ToList();
-                    foreach (var k in expired) _cache.Remove(k);
-                }
-            }
-        }
+        if (result == null) { Poke("所有搜索引擎均不可用，请检查 API Key 配置或等待额度刷新"); return; }
 
         Poke(result);
     }
@@ -206,23 +160,12 @@ public class SmartWebSearch(
         if (string.IsNullOrWhiteSpace(query)) { Poke("搜索关键词不能为空"); return; }
 
         var cfg = Configuration ?? new SmartWebSearchConfig();
-        var baiduKeys = GetBaiduKeys(cfg);
-        if (!baiduKeys.Any(k => !string.IsNullOrWhiteSpace(k))) { Poke("AI总结搜索需要百度千帆API Key"); return; }
+        if (!GetBaiduKeys(cfg).Any(k => !string.IsNullOrWhiteSpace(k)))
+        { Poke("AI总结搜索需要百度千帆API Key"); return; }
 
         var useModel = string.IsNullOrWhiteSpace(model) ? cfg.SummaryModel : model;
         var results = Math.Clamp(maxResults ?? cfg.MaxResults, 1, 20);
-
         var cacheKey = $"summary:{query}:{useModel}:{timeRange}:{results}";
-        if (cfg.EnableCache)
-        {
-            lock (_cacheLock)
-            {
-                if (_cache.TryGetValue(cacheKey, out var cached) && cached.expiry > DateTime.Now)
-                { Log($"缓存命中(AI总结): {query[..Math.Min(30, query.Length)]}..."); Poke(cached.result); return; }
-            }
-        }
-
-        lock (_lock) _exhaustedBaidu.Clear();
 
         var body = new JsonObject
         {
@@ -230,75 +173,12 @@ public class SmartWebSearch(
             ["model"] = useModel,
             ["resource_type_filter"] = new JsonArray { new JsonObject { ["type"] = "web", ["top_k"] = results } },
         };
+        ApplyTimeRange(body, timeRange);
 
-        if (!string.IsNullOrWhiteSpace(timeRange))
-        {
-            var recency = timeRange switch { "day" => "week", "week" => "week", "month" => "month", "year" => "year", _ => (string?)null };
-            if (recency != null) body["search_filter"] = new JsonObject { ["search_recency_filter"] = recency };
-        }
+        var result = await BaiduCallWithRotationAsync(BaiduSummaryUrl, body.ToJsonString(),
+            cacheKey, "AI总结", raw => FormatSummaryResults(raw, query), cfg);
 
-        var bodyJson = body.ToJsonString();
-
-        for (int attempt = 0; attempt < baiduKeys.Count; attempt++)
-        {
-            var (idx, key) = GetNextKey(baiduKeys, _exhaustedBaidu);
-            if (key == null) break;
-
-            try
-            {
-                Log($"AI总结[{idx + 1}] model={useModel} results={results}");
-                using var req = new HttpRequestMessage(HttpMethod.Post, BaiduSummaryUrl);
-                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-                req.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
-
-                using var resp = await _http.SendAsync(req);
-                var raw = await resp.Content.ReadAsStringAsync();
-
-                if ((int)resp.StatusCode == 401 || (int)resp.StatusCode == 403)
-                { Log($"AI总结 账号{idx + 1}认证失败"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-
-                if ((int)resp.StatusCode == 429)
-                {
-                    Log($"AI总结 账号{idx + 1}频率限制，等待2秒重试");
-                    await Task.Delay(2000);
-                    using var req2 = new HttpRequestMessage(HttpMethod.Post, BaiduSummaryUrl);
-                    req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-                    req2.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
-                    using var resp2 = await _http.SendAsync(req2);
-                    raw = await resp2.Content.ReadAsStringAsync();
-                    if (!resp2.IsSuccessStatusCode)
-                    {
-                        if ((int)resp2.StatusCode == 401 || (int)resp2.StatusCode == 403)
-                        { lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                        Log($"AI总结 重试失败({(int)resp2.StatusCode})"); continue;
-                    }
-                    var retrySummary = FormatSummaryResults(raw, query);
-                    Log($"AI总结[{idx + 1}]成功(重试)");
-                    if (cfg.EnableCache) { lock (_cacheLock) _cache[cacheKey] = (retrySummary, DateTime.Now.AddMinutes(cfg.CacheTtlMinutes)); }
-                    Poke(retrySummary); return;
-                }
-
-                if (!resp.IsSuccessStatusCode)
-                {
-                    var errNode = JsonNode.Parse(raw);
-                    var errCode = errNode?["code"]?.GetValue<long>();
-                    var errMsg = errNode?["message"]?.GetValue<string>() ?? "";
-                    if (errCode == 216003 || errMsg.Contains("quota", StringComparison.OrdinalIgnoreCase)
-                        || errMsg.Contains("limit", StringComparison.OrdinalIgnoreCase))
-                    { Log($"AI总结 账号{idx + 1}额度异常(code={errCode})"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                    Log($"AI总结 请求失败({(int)resp.StatusCode}): {errMsg}"); continue;
-                }
-
-                var formatted = FormatSummaryResults(raw, query);
-                Log($"AI总结[{idx + 1}]成功");
-                if (cfg.EnableCache) { lock (_cacheLock) _cache[cacheKey] = (formatted, DateTime.Now.AddMinutes(cfg.CacheTtlMinutes)); }
-                Poke(formatted); return;
-            }
-            catch (TaskCanceledException) { Log($"AI总结 账号{idx + 1}超时"); continue; }
-            catch (Exception ex) { Log($"AI总结 账号{idx + 1}异常: {ex.Message}"); continue; }
-        }
-
-        Poke("AI总结搜索失败，所有百度账号均不可用。可尝试使用智能搜索生成(SmartChatSearch)或普通搜索(Search)");
+        Poke(result ?? "AI总结搜索失败，所有百度账号均不可用。可尝试使用智能搜索生成(SmartChatSearch)或普通搜索(Search)");
     }
 
     static string FormatSummaryResults(string rawJson, string query)
@@ -356,16 +236,15 @@ public class SmartWebSearch(
         [Description("返回参考来源数量，默认5")] int? maxResults = null)
     {
         if (string.IsNullOrWhiteSpace(query)) { Poke("搜索关键词不能为空"); return; }
+
         var cfg = Configuration ?? new SmartWebSearchConfig();
-        var baiduKeys = GetBaiduKeys(cfg);
-        if (!baiduKeys.Any(k => !string.IsNullOrWhiteSpace(k))) { Poke("智能搜索生成需要百度千帆API Key"); return; }
+        if (!GetBaiduKeys(cfg).Any(k => !string.IsNullOrWhiteSpace(k)))
+        { Poke("智能搜索生成需要百度千帆API Key"); return; }
+
         var useModel = string.IsNullOrWhiteSpace(model) ? cfg.ChatSearchModel : model;
         var useDeepSearch = deepSearch ?? cfg.EnableDeepSearch;
         var results = Math.Clamp(maxResults ?? cfg.MaxResults, 1, 20);
         var cacheKey = $"chat:{query}:{useModel}:{useDeepSearch}:{timeRange}:{instruction}:{enableReasoning}:{results}";
-        if (cfg.EnableCache)
-        { lock (_cacheLock) { if (_cache.TryGetValue(cacheKey, out var cached) && cached.expiry > DateTime.Now) { Log($"缓存命中(智能搜索生成): {query[..Math.Min(30, query.Length)]}..."); Poke(cached.result); return; } } }
-        lock (_lock) _exhaustedBaidu.Clear();
 
         var body = new JsonObject
         {
@@ -377,66 +256,12 @@ public class SmartWebSearch(
         if (useDeepSearch) body["enable_deep_search"] = true;
         if (enableReasoning == true) body["enable_reasoning"] = true;
         if (!string.IsNullOrWhiteSpace(instruction)) body["instruction"] = instruction;
-        if (!string.IsNullOrWhiteSpace(timeRange))
-        {
-            var recency = timeRange switch { "day" => "week", "week" => "week", "month" => "month", "year" => "year", _ => (string?)null };
-            if (recency != null) body["search_recency_filter"] = recency;
-        }
-        var bodyJson = body.ToJsonString();
+        ApplyTimeRange(body, timeRange);
 
-        for (int attempt = 0; attempt < baiduKeys.Count; attempt++)
-        {
-            var (idx, key) = GetNextKey(baiduKeys, _exhaustedBaidu);
-            if (key == null) break;
-            try
-            {
-                Log($"智能搜索生成[{idx + 1}] model={useModel} deep={useDeepSearch}");
-                using var req = new HttpRequestMessage(HttpMethod.Post, BaiduChatUrl);
-                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-                req.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
-                using var resp = await _http.SendAsync(req);
-                var raw = await resp.Content.ReadAsStringAsync();
-                if ((int)resp.StatusCode == 401 || (int)resp.StatusCode == 403)
-                { Log($"智能搜索生成 账号{idx + 1}认证失败"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                if ((int)resp.StatusCode == 429)
-                {
-                    Log($"智能搜索生成 账号{idx + 1}频率限制，等待2秒重试");
-                    await Task.Delay(2000);
-                    using var req2 = new HttpRequestMessage(HttpMethod.Post, BaiduChatUrl);
-                    req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-                    req2.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
-                    using var resp2 = await _http.SendAsync(req2);
-                    raw = await resp2.Content.ReadAsStringAsync();
-                    if (!resp2.IsSuccessStatusCode)
-                    {
-                        if ((int)resp2.StatusCode == 401 || (int)resp2.StatusCode == 403)
-                        { lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                        Log($"智能搜索生成 重试失败({(int)resp2.StatusCode})"); continue;
-                    }
-                    var retryChat = FormatChatSearchResults(raw, query);
-                    Log($"智能搜索生成[{idx + 1}]成功(重试)");
-                    if (cfg.EnableCache) { lock (_cacheLock) _cache[cacheKey] = (retryChat, DateTime.Now.AddMinutes(cfg.CacheTtlMinutes)); }
-                    Poke(retryChat); return;
-                }
-                if (!resp.IsSuccessStatusCode)
-                {
-                    var errNode = JsonNode.Parse(raw);
-                    var errCode = errNode?["code"]?.GetValue<long>();
-                    var errMsg = errNode?["message"]?.GetValue<string>() ?? "";
-                    if (errCode == 216003 || errMsg.Contains("quota", StringComparison.OrdinalIgnoreCase)
-                        || errMsg.Contains("limit", StringComparison.OrdinalIgnoreCase))
-                    { Log($"智能搜索生成 账号{idx + 1}额度异常(code={errCode})"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                    Log($"智能搜索生成 请求失败({(int)resp.StatusCode}): {errMsg}"); continue;
-                }
-                var formatted = FormatChatSearchResults(raw, query);
-                Log($"智能搜索生成[{idx + 1}]成功");
-                if (cfg.EnableCache) { lock (_cacheLock) _cache[cacheKey] = (formatted, DateTime.Now.AddMinutes(cfg.CacheTtlMinutes)); }
-                Poke(formatted); return;
-            }
-            catch (TaskCanceledException) { Log($"智能搜索生成 账号{idx + 1}超时"); continue; }
-            catch (Exception ex) { Log($"智能搜索生成 账号{idx + 1}异常: {ex.Message}"); continue; }
-        }
-        Poke("智能搜索生成失败，所有百度账号均不可用。可尝试使用普通搜索(Search)");
+        var result = await BaiduCallWithRotationAsync(BaiduChatUrl, body.ToJsonString(),
+            cacheKey, "智能搜索生成", raw => FormatChatSearchResults(raw, query), cfg);
+
+        Poke(result ?? "智能搜索生成失败，所有百度账号均不可用。可尝试使用普通搜索(Search)");
     }
 
     static string FormatChatSearchResults(string rawJson, string query)
@@ -496,67 +321,19 @@ public class SmartWebSearch(
         [Description("返回结果数量，默认10，最多50")] int? maxResults = null)
     {
         var cfg = Configuration ?? new SmartWebSearchConfig();
-        var baiduKeys = GetBaiduKeys(cfg);
-        if (!baiduKeys.Any(k => !string.IsNullOrWhiteSpace(k))) { Poke("百度热搜需要百度千帆API Key"); return; }
+        if (!GetBaiduKeys(cfg).Any(k => !string.IsNullOrWhiteSpace(k))) { Poke("百度热搜需要百度千帆API Key"); return; }
+
         var validTabs = new[] { "livelihood", "finance", "sports", "new_entertainment", "internation_news", "challenge", "movie", "teleplay", "novel" };
         if (!validTabs.Contains(tab)) { Poke($"无效分类: {tab}，可选: {string.Join(", ", validTabs)}"); return; }
-        var results = Math.Clamp(maxResults ?? 10, 1, 50);
-        var url = $"{BaiduTrendingUrl}?tab={tab}";
-        var cacheKey = $"hot:{tab}:{results}";
-        if (cfg.EnableCache)
-        { lock (_cacheLock) { if (_cache.TryGetValue(cacheKey, out var cached) && cached.expiry > DateTime.Now) { Log($"缓存命中(热搜): {tab}"); Poke(cached.result); return; } } }
-        lock (_lock) _exhaustedBaidu.Clear();
 
-        for (int attempt = 0; attempt < baiduKeys.Count; attempt++)
-        {
-            var (idx, key) = GetNextKey(baiduKeys, _exhaustedBaidu);
-            if (key == null) break;
-            try
-            {
-                Log($"热搜[{idx + 1}] tab={tab} results={results}");
-                using var req = new HttpRequestMessage(HttpMethod.Get, url);
-                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-                using var resp = await _http.SendAsync(req);
-                var raw = await resp.Content.ReadAsStringAsync();
-                if ((int)resp.StatusCode == 401 || (int)resp.StatusCode == 403)
-                { Log($"热搜 账号{idx + 1}认证失败"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                if ((int)resp.StatusCode == 429)
-                {
-                    Log($"热搜 账号{idx + 1}频率限制，等待2秒重试");
-                    await Task.Delay(2000);
-                    using var req2 = new HttpRequestMessage(HttpMethod.Get, url);
-                    req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-                    using var resp2 = await _http.SendAsync(req2);
-                    raw = await resp2.Content.ReadAsStringAsync();
-                    if (!resp2.IsSuccessStatusCode)
-                    {
-                        if ((int)resp2.StatusCode == 401 || (int)resp2.StatusCode == 403)
-                        { lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                        Log($"热搜 重试失败({(int)resp2.StatusCode})"); continue;
-                    }
-                    var retryHot = FormatHotSearchResults(raw, tab, results);
-                    Log($"热搜[{idx + 1}]成功(重试)");
-                    if (cfg.EnableCache) { lock (_cacheLock) _cache[cacheKey] = (retryHot, DateTime.Now.AddMinutes(cfg.CacheTtlMinutes)); }
-                    Poke(retryHot); return;
-                }
-                if (!resp.IsSuccessStatusCode)
-                {
-                    var errNode = JsonNode.Parse(raw);
-                    var errCode = errNode?["code"]?.GetValue<long>();
-                    var errMsg = errNode?["message"]?.GetValue<string>() ?? "";
-                    if (errCode == 216003 || errMsg.Contains("quota", StringComparison.OrdinalIgnoreCase))
-                    { Log($"热搜 账号{idx + 1}额度异常(code={errCode})"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                    Log($"热搜 请求失败({(int)resp.StatusCode}): {errMsg}"); continue;
-                }
-                var formatted = FormatHotSearchResults(raw, tab, results);
-                Log($"热搜[{idx + 1}]成功");
-                if (cfg.EnableCache) { lock (_cacheLock) _cache[cacheKey] = (formatted, DateTime.Now.AddMinutes(cfg.CacheTtlMinutes)); }
-                Poke(formatted); return;
-            }
-            catch (TaskCanceledException) { Log($"热搜 账号{idx + 1}超时"); continue; }
-            catch (Exception ex) { Log($"热搜 账号{idx + 1}异常: {ex.Message}"); continue; }
-        }
-        Poke("百度热搜获取失败，所有百度账号均不可用");
+        var results = Math.Clamp(maxResults ?? 10, 1, 50);
+        var cacheKey = $"hot:{tab}:{results}";
+        var url = $"{BaiduTrendingUrl}?tab={tab}";
+
+        var result = await BaiduCallWithRotationAsync(url, "", cacheKey, "热搜",
+            raw => FormatHotSearchResults(raw, tab, results), cfg, isGet: true);
+
+        Poke(result ?? "百度热搜获取失败，所有百度账号均不可用");
     }
 
     static string FormatHotSearchResults(string rawJson, string tab, int maxResults)
@@ -613,53 +390,26 @@ public class SmartWebSearch(
     public async Task ImageRecognition([Description("图片URL地址")] string imageUrl)
     {
         if (string.IsNullOrWhiteSpace(imageUrl)) { Poke("图片URL不能为空"); return; }
+
         var cfg = Configuration ?? new SmartWebSearchConfig();
-        var baiduKeys = GetBaiduKeys(cfg);
-        if (!baiduKeys.Any(k => !string.IsNullOrWhiteSpace(k))) { Poke("智能识图需要百度千帆API Key"); return; }
-        lock (_lock) _exhaustedBaidu.Clear();
+        if (!GetBaiduKeys(cfg).Any(k => !string.IsNullOrWhiteSpace(k))) { Poke("智能识图需要百度千帆API Key"); return; }
+
         string imageBase64;
-        try { Log("识图: 下载图片..."); imageBase64 = await DownloadImageAsBase64Async(imageUrl); Log($"识图: base64 {imageBase64.Length / 1024}KB"); }
-        catch (Exception ex) { Poke($"图片下载失败: {ex.Message}"); return; }
-        var bodyJson = new JsonObject { ["image_b64"] = imageBase64 }.ToJsonString();
-        for (int attempt = 0; attempt < baiduKeys.Count; attempt++)
+        try
         {
-            var (idx, key) = GetNextKey(baiduKeys, _exhaustedBaidu);
-            if (key == null) break;
-            try
-            {
-                Log($"识图[{idx + 1}] 发送请求");
-                using var req = new HttpRequestMessage(HttpMethod.Post, BaiduImageRecognitionUrl);
-                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-                req.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
-                using var resp = await _http.SendAsync(req);
-                var raw = await resp.Content.ReadAsStringAsync();
-                if ((int)resp.StatusCode == 401 || (int)resp.StatusCode == 403) { Log($"识图 账号{idx + 1}认证失败"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                if ((int)resp.StatusCode == 429)
-                {
-                    Log($"识图 账号{idx + 1}频率限制，等待2秒重试"); await Task.Delay(2000);
-                    using var req2 = new HttpRequestMessage(HttpMethod.Post, BaiduImageRecognitionUrl);
-                    req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-                    req2.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
-                    using var resp2 = await _http.SendAsync(req2); raw = await resp2.Content.ReadAsStringAsync();
-                    if (!resp2.IsSuccessStatusCode)
-                    {
-                        if ((int)resp2.StatusCode == 401 || (int)resp2.StatusCode == 403) { lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                        Log($"识图 重试失败({(int)resp2.StatusCode})"); continue;
-                    }
-                    var retryImg = FormatImageRecognitionResults(raw); Log($"识图[{idx + 1}]成功(重试)"); Poke(retryImg); return;
-                }
-                if (!resp.IsSuccessStatusCode)
-                {
-                    var errNode = JsonNode.Parse(raw); var errCode = errNode?["code"]?.GetValue<long>(); var errMsg = errNode?["message"]?.GetValue<string>() ?? "";
-                    if (errCode == 216003 || errMsg.Contains("quota", StringComparison.OrdinalIgnoreCase)) { Log($"识图 账号{idx + 1}额度异常"); lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                    Log($"识图 请求失败({(int)resp.StatusCode}): {errMsg}"); continue;
-                }
-                var formatted = FormatImageRecognitionResults(raw); Log($"识图[{idx + 1}]成功"); Poke(formatted); return;
-            }
-            catch (TaskCanceledException) { Log($"识图 账号{idx + 1}超时"); continue; }
-            catch (Exception ex) { Log($"识图 账号{idx + 1}异常: {ex.Message}"); continue; }
+            Log("识图: 下载图片...");
+            imageBase64 = await DownloadImageAsBase64Async(imageUrl);
+            Log($"识图: base64 {imageBase64.Length / 1024}KB");
         }
-        Poke("智能识图失败，所有百度账号均不可用");
+        catch (Exception ex) { Poke($"图片下载失败: {ex.Message}"); return; }
+
+        var bodyJson = new JsonObject { ["image_b64"] = imageBase64 }.ToJsonString();
+
+        // 识图不缓存：模型可能返回不同细节
+        var result = await BaiduCallWithRotationAsync(BaiduImageRecognitionUrl, bodyJson,
+            cacheKey: null, "识图", raw => FormatImageRecognitionResults(raw), cfg);
+
+        Poke(result ?? "智能识图失败，所有百度账号均不可用");
     }
 
     static string FormatImageRecognitionResults(string rawJson)
@@ -786,7 +536,7 @@ public class SmartWebSearch(
     #region Tavily 搜索
 
     async Task<string?> TryTavilySearch(string query, string depth, string? topic,
-        string? timeRange, int results, List<string> keys)
+        string? timeRange, int results, string cacheKey, SmartWebSearchConfig cfg)
     {
         var body = new JsonObject
         {
@@ -797,87 +547,9 @@ public class SmartWebSearch(
         };
         if (!string.IsNullOrWhiteSpace(topic)) body["topic"] = topic;
         if (!string.IsNullOrWhiteSpace(timeRange)) body["time_range"] = timeRange;
-        var bodyJson = body.ToJsonString();
 
-        for (int attempt = 0; attempt < keys.Count; attempt++)
-        {
-            var (idx, key) = GetNextKey(keys, _exhaustedTavily);
-            if (key == null) break;
-
-            try
-            {
-                Log($"Tavily [{idx + 1}] depth={depth} results={results}");
-                using var req = new HttpRequestMessage(HttpMethod.Post, TavilyUrl);
-                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-                req.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
-
-                using var resp = await _http.SendAsync(req);
-                var raw = await resp.Content.ReadAsStringAsync();
-
-                // 额度耗尽：432(Key/Plan Limit) / 433(PayGo Limit)
-                if ((int)resp.StatusCode == 432 || (int)resp.StatusCode == 433)
-                {
-                    Log($"Tavily 账号 {idx + 1} 额度耗尽 (HTTP {(int)resp.StatusCode})，切换下一个");
-                    lock (_lock) _exhaustedTavily.Add(idx);
-                    continue;
-                }
-
-                // 频率限制：等待后重试一次
-                if ((int)resp.StatusCode == 429)
-                {
-                    Log($"Tavily 账号 {idx + 1} 频率限制，等待2秒重试");
-                    await Task.Delay(2000);
-                    using var req2 = new HttpRequestMessage(HttpMethod.Post, TavilyUrl);
-                    req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-                    req2.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
-                    using var resp2 = await _http.SendAsync(req2);
-                    raw = await resp2.Content.ReadAsStringAsync();
-
-                    if (!resp2.IsSuccessStatusCode)
-                    {
-                        if ((int)resp2.StatusCode == 432 || (int)resp2.StatusCode == 433)
-                        { lock (_lock) _exhaustedTavily.Add(idx); continue; }
-                        Log($"Tavily 重试失败 (HTTP {(int)resp2.StatusCode})");
-                        continue;
-                    }
-
-                    // 重试成功，直接格式化返回
-                    var retryResult = FormatTavilyResults(raw, query);
-                    Log($"Tavily [{idx + 1}] 搜索成功（重试）");
-                    return retryResult;
-                }
-
-                // Key无效
-                if ((int)resp.StatusCode == 401)
-                {
-                    Log($"Tavily 账号 {idx + 1} Key无效 (401)，切换下一个");
-                    lock (_lock) _exhaustedTavily.Add(idx);
-                    continue;
-                }
-
-                // 服务端错误
-                if ((int)resp.StatusCode >= 500)
-                {
-                    Log($"Tavily 服务端错误 (HTTP {(int)resp.StatusCode})");
-                    continue;
-                }
-
-                if (!resp.IsSuccessStatusCode)
-                {
-                    Log($"Tavily 请求失败 (HTTP {(int)resp.StatusCode}): {raw[..Math.Min(200, raw.Length)]}");
-                    continue;
-                }
-
-                // 成功
-                var formatted = FormatTavilyResults(raw, query);
-                Log($"Tavily [{idx + 1}] 搜索成功");
-                return formatted;
-            }
-            catch (TaskCanceledException) { Log($"Tavily 账号 {idx + 1} 超时"); continue; }
-            catch (Exception ex) { Log($"Tavily 账号 {idx + 1} 异常: {ex.Message}"); continue; }
-        }
-
-        return null;
+        return await TavilyCallWithRotationAsync(TavilyUrl, body.ToJsonString(),
+            cacheKey, "Tavily", raw => FormatTavilyResults(raw, query), cfg);
     }
 
     static string FormatTavilyResults(string rawJson, string query)
@@ -931,12 +603,11 @@ public class SmartWebSearch(
     #region 百度搜索
 
     async Task<string?> TryBaiduSearch(string query, string depth, string? timeRange,
-        int results, bool? includeImages, bool? includeVideos, List<string> keys)
+        int results, bool? includeImages, bool? includeVideos, string cacheKey, SmartWebSearchConfig cfg)
     {
         // 百度query限制72字符（汉字算2字符）
         var truncatedQuery = TruncateForBaidu(query);
 
-        // 构建请求体
         var resourceFilter = new JsonArray
         {
             new JsonObject { ["type"] = "web", ["top_k"] = results }
@@ -958,102 +629,10 @@ public class SmartWebSearch(
 
         // 深度映射: basic→lite(快速), advanced→standard(完整)
         body["edition"] = depth == "advanced" ? "standard" : "lite";
+        ApplyTimeRange(body, timeRange);
 
-        // 时间范围映射: day→week(百度最小week), week→week, month→month, year→year
-        if (!string.IsNullOrWhiteSpace(timeRange))
-        {
-            var recency = timeRange switch
-            {
-                "day" => "week",
-                "week" => "week",
-                "month" => "month",
-                "year" => "year",
-                _ => (string?)null
-            };
-            if (recency != null) body["search_recency_filter"] = recency;
-        }
-
-        var bodyJson = body.ToJsonString();
-
-        for (int attempt = 0; attempt < keys.Count; attempt++)
-        {
-            var (idx, key) = GetNextKey(keys, _exhaustedBaidu);
-            if (key == null) break;
-
-            try
-            {
-                Log($"百度 [{idx + 1}] edition={body["edition"]} results={results}");
-                using var req = new HttpRequestMessage(HttpMethod.Post, BaiduUrl);
-                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-                req.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
-
-                using var resp = await _http.SendAsync(req);
-                var raw = await resp.Content.ReadAsStringAsync();
-
-                // 百度认证错误: code=216003
-                if ((int)resp.StatusCode == 401 || (int)resp.StatusCode == 403)
-                {
-                    Log($"百度 账号 {idx + 1} 认证失败 (HTTP {(int)resp.StatusCode})，切换下一个");
-                    lock (_lock) _exhaustedBaidu.Add(idx);
-                    continue;
-                }
-
-                // 频率限制
-                if ((int)resp.StatusCode == 429)
-                {
-                    Log($"百度 账号 {idx + 1} 频率限制，等待2秒重试");
-                    await Task.Delay(2000);
-                    using var req2 = new HttpRequestMessage(HttpMethod.Post, BaiduUrl);
-                    req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-                    req2.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
-                    using var resp2 = await _http.SendAsync(req2);
-                    raw = await resp2.Content.ReadAsStringAsync();
-
-                    if (!resp2.IsSuccessStatusCode)
-                    {
-                        if ((int)resp2.StatusCode == 401 || (int)resp2.StatusCode == 403)
-                        { lock (_lock) _exhaustedBaidu.Add(idx); continue; }
-                        Log($"百度 重试失败 (HTTP {(int)resp2.StatusCode})");
-                        continue;
-                    }
-
-                    // 重试成功，直接格式化返回
-                    var retryResult = FormatBaiduResults(raw, query);
-                    Log($"百度 [{idx + 1}] 搜索成功（重试）");
-                    return retryResult;
-                }
-
-                // 检查响应体中的错误码（额度耗尽等）
-                if (!resp.IsSuccessStatusCode)
-                {
-                    // 尝试解析错误码
-                    var errNode = JsonNode.Parse(raw);
-                    var errCode = errNode?["code"]?.GetValue<long>();
-                    var errMsg = errNode?["message"]?.GetValue<string>() ?? "";
-
-                    // 216003=认证错误, 其他quota相关错误码也视为账号耗尽
-                    if (errCode == 216003 || errMsg.Contains("quota", StringComparison.OrdinalIgnoreCase)
-                        || errMsg.Contains("limit", StringComparison.OrdinalIgnoreCase))
-                    {
-                        Log($"百度 账号 {idx + 1} 额度/认证异常 (code={errCode})，切换下一个");
-                        lock (_lock) _exhaustedBaidu.Add(idx);
-                        continue;
-                    }
-
-                    Log($"百度 请求失败 (HTTP {(int)resp.StatusCode}): {errMsg}");
-                    continue;
-                }
-
-                // 成功
-                var formatted = FormatBaiduResults(raw, query);
-                Log($"百度 [{idx + 1}] 搜索成功");
-                return formatted;
-            }
-            catch (TaskCanceledException) { Log($"百度 账号 {idx + 1} 超时"); continue; }
-            catch (Exception ex) { Log($"百度 账号 {idx + 1} 异常: {ex.Message}"); continue; }
-        }
-
-        return null;
+        return await BaiduCallWithRotationAsync(BaiduUrl, body.ToJsonString(),
+            cacheKey, "百度", raw => FormatBaiduResults(raw, query), cfg);
     }
 
     static string FormatBaiduResults(string rawJson, string query)
@@ -1179,7 +758,264 @@ public class SmartWebSearch(
 
     #endregion
 
-    #region 辅助方法
+    #region 通用调用骨架（百度）
+
+    /// <summary>
+    /// 百度通用调用骨架：账号轮换 + 401/403/429/额度异常 + 缓存读写 + 日志。
+    /// cacheKey 为 null 时跳过缓存。
+    /// </summary>
+    async Task<string?> BaiduCallWithRotationAsync(
+        string url, string bodyJson, string? cacheKey, string label,
+        Func<string, string> formatter, SmartWebSearchConfig cfg, bool isGet = false)
+    {
+        // 缓存命中
+        if (cacheKey != null && TryGetCached(cfg, cacheKey, out var cached))
+        {
+            Log($"缓存命中({label})");
+            return cached;
+        }
+
+        lock (_lock) _exhaustedBaidu.Clear();
+
+        var baiduKeys = GetBaiduKeys(cfg);
+        for (int attempt = 0; attempt < baiduKeys.Count; attempt++)
+        {
+            var (idx, key) = GetNextKey(baiduKeys, _exhaustedBaidu);
+            if (key == null) break;
+
+            try
+            {
+                Log($"{label}[{idx + 1}]");
+                using var req = new HttpRequestMessage(isGet ? HttpMethod.Get : HttpMethod.Post, url);
+                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
+                if (!isGet) req.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
+
+                using var resp = await _http.SendAsync(req);
+                var raw = await resp.Content.ReadAsStringAsync();
+
+                // 401/403：账号认证失败，切换下一个
+                if ((int)resp.StatusCode == 401 || (int)resp.StatusCode == 403)
+                {
+                    Log($"{label} 账号{idx + 1}认证失败");
+                    lock (_lock) _exhaustedBaidu.Add(idx);
+                    continue;
+                }
+
+                // 429：频率限制，等待2秒后重试一次
+                if ((int)resp.StatusCode == 429)
+                {
+                    Log($"{label} 账号{idx + 1}频率限制，等待2秒重试");
+                    await Task.Delay(2000);
+                    using var req2 = new HttpRequestMessage(isGet ? HttpMethod.Get : HttpMethod.Post, url);
+                    req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
+                    if (!isGet) req2.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
+                    using var resp2 = await _http.SendAsync(req2);
+                    raw = await resp2.Content.ReadAsStringAsync();
+
+                    if (!resp2.IsSuccessStatusCode)
+                    {
+                        if ((int)resp2.StatusCode == 401 || (int)resp2.StatusCode == 403)
+                        { lock (_lock) _exhaustedBaidu.Add(idx); continue; }
+                        Log($"{label} 重试失败({(int)resp2.StatusCode})");
+                        continue;
+                    }
+
+                    var retryResult = formatter(raw);
+                    Log($"{label}[{idx + 1}]成功(重试)");
+                    if (cacheKey != null) SaveCache(cfg, cacheKey, retryResult);
+                    return retryResult;
+                }
+
+                // 额度耗尽 / 其他失败：尝试解析响应体错误码
+                if (!resp.IsSuccessStatusCode)
+                {
+                    var errNode = JsonNode.Parse(raw);
+                    var errCode = errNode?["code"]?.GetValue<long>();
+                    var errMsg = errNode?["message"]?.GetValue<string>() ?? "";
+                    if (errCode == 216003 || errMsg.Contains("quota", StringComparison.OrdinalIgnoreCase)
+                        || errMsg.Contains("limit", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Log($"{label} 账号{idx + 1}额度/认证异常(code={errCode})，切换下一个");
+                        lock (_lock) _exhaustedBaidu.Add(idx);
+                        continue;
+                    }
+                    Log($"{label} 请求失败({(int)resp.StatusCode}): {errMsg}");
+                    continue;
+                }
+
+                // 成功
+                var formatted = formatter(raw);
+                Log($"{label}[{idx + 1}]成功");
+                if (cacheKey != null) SaveCache(cfg, cacheKey, formatted);
+                return formatted;
+            }
+            catch (TaskCanceledException) { Log($"{label} 账号{idx + 1}超时"); continue; }
+            catch (Exception ex) { Log($"{label} 账号{idx + 1}异常: {ex.Message}"); continue; }
+        }
+
+        return null;
+    }
+
+    #endregion
+
+    #region 通用调用骨架（Tavily）
+
+    /// <summary>
+    /// Tavily 通用调用骨架：账号轮换 + 432/433额度耗尽 + 429重试 + 401无效Key + 5xx + 缓存读写 + 日志。
+    /// cacheKey 为 null 时跳过缓存。
+    /// </summary>
+    async Task<string?> TavilyCallWithRotationAsync(
+        string url, string bodyJson, string? cacheKey, string label,
+        Func<string, string> formatter, SmartWebSearchConfig cfg)
+    {
+        if (cacheKey != null && TryGetCached(cfg, cacheKey, out var cached))
+        {
+            Log($"缓存命中({label})");
+            return cached;
+        }
+
+        lock (_lock) _exhaustedTavily.Clear();
+
+        var tavilyKeys = GetTavilyKeys(cfg);
+        for (int attempt = 0; attempt < tavilyKeys.Count; attempt++)
+        {
+            var (idx, key) = GetNextKey(tavilyKeys, _exhaustedTavily);
+            if (key == null) break;
+
+            try
+            {
+                Log($"{label} [{idx + 1}]");
+                using var req = new HttpRequestMessage(HttpMethod.Post, url);
+                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
+                req.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
+
+                using var resp = await _http.SendAsync(req);
+                var raw = await resp.Content.ReadAsStringAsync();
+
+                // 额度耗尽：432(Key/Plan Limit) / 433(PayGo Limit)
+                if ((int)resp.StatusCode == 432 || (int)resp.StatusCode == 433)
+                {
+                    Log($"{label} 账号 {idx + 1} 额度耗尽 (HTTP {(int)resp.StatusCode})，切换下一个");
+                    lock (_lock) _exhaustedTavily.Add(idx);
+                    continue;
+                }
+
+                // 频率限制：等待后重试一次
+                if ((int)resp.StatusCode == 429)
+                {
+                    Log($"{label} 账号 {idx + 1} 频率限制，等待2秒重试");
+                    await Task.Delay(2000);
+                    using var req2 = new HttpRequestMessage(HttpMethod.Post, url);
+                    req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
+                    req2.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
+                    using var resp2 = await _http.SendAsync(req2);
+                    raw = await resp2.Content.ReadAsStringAsync();
+
+                    if (!resp2.IsSuccessStatusCode)
+                    {
+                        if ((int)resp2.StatusCode == 432 || (int)resp2.StatusCode == 433)
+                        { lock (_lock) _exhaustedTavily.Add(idx); continue; }
+                        Log($"{label} 重试失败 (HTTP {(int)resp2.StatusCode})");
+                        continue;
+                    }
+
+                    var retryResult = formatter(raw);
+                    Log($"{label} [{idx + 1}] 搜索成功（重试）");
+                    if (cacheKey != null) SaveCache(cfg, cacheKey, retryResult);
+                    return retryResult;
+                }
+
+                // Key无效
+                if ((int)resp.StatusCode == 401)
+                {
+                    Log($"{label} 账号 {idx + 1} Key无效 (401)，切换下一个");
+                    lock (_lock) _exhaustedTavily.Add(idx);
+                    continue;
+                }
+
+                // 服务端错误
+                if ((int)resp.StatusCode >= 500)
+                {
+                    Log($"{label} 服务端错误 (HTTP {(int)resp.StatusCode})");
+                    continue;
+                }
+
+                if (!resp.IsSuccessStatusCode)
+                {
+                    Log($"{label} 请求失败 (HTTP {(int)resp.StatusCode}): {raw[..Math.Min(200, raw.Length)]}");
+                    continue;
+                }
+
+                // 成功
+                var formatted = formatter(raw);
+                Log($"{label} [{idx + 1}] 搜索成功");
+                if (cacheKey != null) SaveCache(cfg, cacheKey, formatted);
+                return formatted;
+            }
+            catch (TaskCanceledException) { Log($"{label} 账号 {idx + 1} 超时"); continue; }
+            catch (Exception ex) { Log($"{label} 账号 {idx + 1} 异常: {ex.Message}"); continue; }
+        }
+
+        return null;
+    }
+
+    #endregion
+
+    #region 缓存与辅助
+
+    /// <summary>
+    /// 检查缓存命中，命中返回 true 并通过 out 返回结果
+    /// </summary>
+    bool TryGetCached(SmartWebSearchConfig cfg, string cacheKey, out string result)
+    {
+        result = null!;
+        if (!cfg.EnableCache) return false;
+        lock (_cacheLock)
+        {
+            if (_cache.TryGetValue(cacheKey, out var cached) && cached.expiry > DateTime.Now)
+            {
+                result = cached.result;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// 写入缓存，自动清理过期项
+    /// </summary>
+    void SaveCache(SmartWebSearchConfig cfg, string cacheKey, string result)
+    {
+        if (!cfg.EnableCache) return;
+        lock (_cacheLock)
+        {
+            _cache[cacheKey] = (result, DateTime.Now.AddMinutes(cfg.CacheTtlMinutes));
+            if (_cache.Count > 100)
+            {
+                var expired = _cache.Where(k => k.Value.expiry <= DateTime.Now)
+                    .Select(k => k.Key).ToList();
+                foreach (var k in expired) _cache.Remove(k);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 百度/智能搜索通用：把 day/week/month/year 映射到百度 search_recency_filter
+    /// （百度最小粒度为 week，day→week）
+    /// </summary>
+    static void ApplyTimeRange(JsonObject body, string? timeRange)
+    {
+        if (string.IsNullOrWhiteSpace(timeRange)) return;
+        var recency = timeRange switch
+        {
+            "day" => "week",
+            "week" => "week",
+            "month" => "month",
+            "year" => "year",
+            _ => (string?)null
+        };
+        if (recency != null) body["search_recency_filter"] = recency;
+    }
 
     (int index, string? key) GetNextKey(List<string> keys, HashSet<int> exhausted)
     {
