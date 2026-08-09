@@ -579,6 +579,13 @@ public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSea
             AddHint(b, ref i, "缓存结果的保留时间，默认 5 分钟");
         });
 
+        // === 注入设置 ===
+        RenderSection(b, ref i, "⇲", "注入设置", null, () =>
+        {
+            AddToggle(b, ref i, "隐式注入（省 token）", Configuration.ImplicitInjection, v => Configuration.ImplicitInjection = v);
+            AddHint(b, ref i, "开启后函数文档不直接注入系统提示词，AI 需先调用 <smartwebsearch/> 按需加载（省 token，渐进式）；关闭则为显式注入（默认，功能说明直接可用）。改动需重载模块后生效");
+        });
+
         b.CloseElement();
     }
 

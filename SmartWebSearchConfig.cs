@@ -48,4 +48,10 @@ public class SmartWebSearchConfig
 
     // 缓存过期时间（分钟），默认5分钟
     public int CacheTtlMinutes { get; set; } = 5;
+
+    // === 注入设置 ===
+    // 隐式注入（4.0 新特性）：开启后函数文档不直接注入系统提示词，
+    // AI 需先调用 <smartwebsearch/> 按需加载（省 token，渐进式）；
+    // 关闭则显式注入（默认），功能说明直接可用。
+    public bool ImplicitInjection { get; set; } = false;
 }

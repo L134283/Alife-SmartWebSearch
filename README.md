@@ -66,6 +66,7 @@
 | EnableDeepSearch | 启用深度搜索（耗费较多额度）| false |
 | EnableCache | 启用结果缓存 | true |
 | CacheTtlMinutes | 缓存过期时间 | 5分钟 |
+| ImplicitInjection | 隐式注入（函数文档按需加载，省token）| false |
 
 ## 函数参数
 
@@ -115,7 +116,8 @@
 
 ```
 Alife.Plugin.SmartWebSearch/
-├── Alife.Plugin.SmartWebSearch.json   # 插件清单
+├── Alife.Plugin.SmartWebSearch.json   # 市场注册清单
+├── manifest.json                      # 插件依赖清单
 ├── SmartWebSearch.cs                  # 主模块（5个工具+智能路由+缓存+图片压缩）
 ├── SmartWebSearchConfig.cs            # 配置类
 ├── SmartWebSearchUI_razor.g.cs        # UI界面
@@ -129,3 +131,4 @@ Alife.Plugin.SmartWebSearch/
 - **1.0.1** (2026-07-04)：修复 System.Drawing.Common 版本兼容性(9.0.0→>=9.0.0)；修复系统提示词函数文档重复注入
 - **1.0.2** (2026-07-11)：提示词瘦身 + 代码重构抽通用骨架 + 炼金主题UI
 - **1.1.0** (2026-07-11)：UI 文本收敛（封印→配置/已注入→已启用/去 Section 前缀）+ 纯 CSS 曼陀罗光轮 + 五芒星 orb + 晶洞角饰视觉增强
+- **4.0.0** (2026-08-09)：适配 Alife 4.0.0 框架（ChatBehaviour + IInteractor）；新增隐式注入开关（函数文档按需加载，省token）；系统提示词瘦身；新增 manifest.json；修复多处健壮性问题（429重试循环、图片下载无大小限制、百度错误码解析异常、JSON字段类型不匹配导致整批结果丢失）
