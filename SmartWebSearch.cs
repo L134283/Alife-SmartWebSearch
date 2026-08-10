@@ -118,9 +118,8 @@ public class SmartWebSearch(
         var documentMode = cfg.ImplicitInjection
             ? DocumentMode.Implicit
             : DocumentMode.Explicit;
-        var handler = new XmlHandler
+        var handler = new XmlHandler("SmartWebSearch")
         {
-            Name = "SmartWebSearch",
             Description = "网络智能搜索：AI总结搜索 + 智能搜索生成 + 双引擎搜索(Tavily+百度) + 百度热搜 + 智能识图，智能路由，多账号轮换。",
             // 隐式模式：详细规则随 <smartwebsearch/> 加载的文档一并输出；显式模式保持 null 避免重复注入
             Explanation = explanation,

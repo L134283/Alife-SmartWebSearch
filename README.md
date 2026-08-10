@@ -132,3 +132,4 @@ Alife.Plugin.SmartWebSearch/
 - **1.0.2** (2026-07-11)：提示词瘦身 + 代码重构抽通用骨架 + 炼金主题UI
 - **1.1.0** (2026-07-11)：UI 文本收敛（封印→配置/已注入→已启用/去 Section 前缀）+ 纯 CSS 曼陀罗光轮 + 五芒星 orb + 晶洞角饰视觉增强
 - **4.0.0** (2026-08-09)：适配 Alife 4.0.0 框架（ChatBehaviour + IInteractor）；新增隐式注入开关（函数文档按需加载，省token）；系统提示词瘦身；新增 manifest.json；修复多处健壮性问题（429重试循环、图片下载无大小限制、百度错误码解析异常、JSON字段类型不匹配导致整批结果丢失）
+- **4.2.0** (2026-08-10)：适配 Alife 4.2.0 框架（XmlHandler API 变更：Name 改为只读、构造函数需传 name，改用 `new XmlHandler("SmartWebSearch") { ... }` 初始化器写法）
