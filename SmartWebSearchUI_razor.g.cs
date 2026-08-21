@@ -495,24 +495,33 @@ public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSea
         b.CloseElement();
         b.OpenElement(i++, "div");
         b.AddAttribute(i++, "class", "sws-intro-text");
-        b.AddContent(i++, "🜂 多功能AI搜索：AI总结(高性能) + 智能搜索生成(标准) + 双引擎搜索 + 百度热搜 + 智能识图\n🜂 百度渠道优先级：AI总结 > 智能搜索 > 普通搜索\n🜂 每引擎支持 4 组 API Key，额度耗尽自动轮换\n🜂 修改配置后需重新加载模块（设置→插件→刷新）");
+        b.AddContent(i++, "🜂 多功能AI搜索：AnySearch家族 + AI总结(高性能) + 智能搜索生成(标准) + 双引擎搜索 + 百度热搜 + 智能识图\n🜂 AnySearch 免Key即用：通用/垂直搜索、批量搜索、网页正文提取、垂直领域目录\n🜂 每引擎支持 4 组 API Key（AnySearch 可留空走匿名），额度耗尽自动轮换\n🜂 修改配置后需重新加载模块（设置→插件→刷新）");
         b.CloseElement();
         b.CloseElement();
 
         // === 引擎模式 ===
         int tavilyCount = CountKeys(Configuration.TavilyApiKey1, Configuration.TavilyApiKey2, Configuration.TavilyApiKey3, Configuration.TavilyApiKey4);
         int baiduCount = CountKeys(Configuration.BaiduApiKey1, Configuration.BaiduApiKey2, Configuration.BaiduApiKey3, Configuration.BaiduApiKey4);
+        int anysearchCount = CountKeys(Configuration.AnySearchApiKey);
 
         RenderSection(b, ref i, "⚹", "引擎模式", null, () =>
         {
             AddSelectField(b, ref i, "搜索引擎模式", Configuration.Engine,
                 v => Configuration.Engine = v,
                 new[] {
-                    ("auto", "auto · 智能路由（中文→百度，英文→Tavily）"),
+                    ("anysearch", "anysearch · 仅 AnySearch（免Key，默认）"),
+                    ("auto", "auto · 智能路由（多渠道同时开启时）"),
                     ("tavily", "tavily · 仅 Tavily"),
                     ("baidu", "baidu · 仅百度"),
                 });
-            AddHint(b, ref i, "auto：智能路由（中文→百度，英文→Tavily，配额耗尽自动切换）\ntavily：仅用 Tavily\nbaidu：仅用百度");
+            AddHint(b, ref i, "单引擎模式只注入/启用该引擎的工具，其他引擎的工具不显示也不可调（省 token）；auto 多渠道时全部工具可用\n\nanysearch：仅 AnySearch（免Key，默认）\nauto：智能路由（多渠道同时开启时）\ntavily：仅 Tavily\nbaidu：仅百度");
+        });
+
+        // === AnySearch 配置 ===
+        RenderSection(b, ref i, "✧", "AnySearch 配置", anysearchCount, () =>
+        {
+            AddHint(b, ref i, "免Key匿名即可用（速率/配额较低），开箱即用；注册免费Key提额：https://anysearch.com/console/api-keys\nKey 格式 as_sk_xxx，认证方式 Bearer Token（留空走免Key匿名模式）\n\n能力：AnySearch(通用+垂直搜索, tag+params) / AnySearchBatchSearch(并行批量1-5查询) / ExtractWebpage(网页正文转Markdown) / GetSubDomains(垂直领域目录)");
+            AddPassword(b, ref i, "AnySearch API Key（可留空，走免Key匿名模式）", Configuration.AnySearchApiKey, v => Configuration.AnySearchApiKey = v);
         });
 
         // === Tavily 配置 ===

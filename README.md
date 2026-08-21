@@ -4,6 +4,11 @@
 
 ## 功能特性
 
+- **AnySearch 搜索家族（默认引擎，免Key即用）**：
+  - **AnySearch**：通用/垂直搜索，免Key匿名可用，支持垂直领域标签（`tag`）+ 参数（`params`）精准搜索
+  - **AnySearchBatchSearch**：并行批量搜索 1-5 个查询（Tavily/百度没有的能力）
+  - **ExtractWebpage**：网页正文提取转 Markdown（适合完整阅读网页文章/文档）
+  - **GetSubDomains**：垂直领域目录查询（如 finance.quote），先查参数再精准搜
 - **AI总结搜索（高性能版）**：搜索+大模型总结一步到位，支持思考模型，免费100次/天
 - **智能搜索生成（标准版）**：功能最全面的AI搜索，支持可选深度搜索、知识注入、追问等，免费100次/天
 - **双引擎搜索**：Tavily（英文强+AI摘要）+ 百度（中文强+图片视频），智能路由，免费50次/天
@@ -12,35 +17,42 @@
 - **多账号轮换**：每个引擎支持最多4组API Key，额度耗尽自动切换
 - **结果缓存**：相同查询在TTL内不重复调用API，节省额度
 
-## 工具优先级（百度渠道）
+## 工具优先级
 
+**默认（仅 AnySearch 引擎）**：AnySearch（通用/垂直搜索）→ AnySearchBatchSearch（批量并行）→ ExtractWebpage（正文提取）→ GetSubDomains（垂直目录）
+
+**百度渠道（Auto 多渠道开启时）**：
 1. **SmartSummary**（AI总结搜索）— 默认首选，搜索+总结一步到位
 2. **SmartChatSearch**（智能搜索生成）— SmartSummary失败时降级，功能最全面
-3. **Search**（普通搜索）— AI搜索均失败时最终降级，双引擎智能路由
+3. **Search**（普通搜索）— AI搜索均失败时最终降级，双引擎智能路由，AnySearch 免Key兜底
 4. **HotSearch**（百度热搜）— 用户想看热搜/今日热点时使用
 5. **ImageRecognition**（智能识图）— 用户引用图片问"这是什么"时使用
 
 ## 引擎对比（Search工具）
 
-| 特性 | Tavily | 百度搜索 |
-|------|--------|---------|
-| 认证方式 | Bearer Token | Bearer Token |
-| 免费额度 | 1000 credits/月 | 50次/天 |
-| AI摘要 | 有（answer字段）| 无 |
-| 图片/视频 | 不支持 | 支持 |
-| 主题分类 | general/news/finance | 无 |
-| 中文搜索 | 一般 | 强 |
-| 英文搜索 | 强 | 一般 |
-| Query限制 | 无 | 72字符（汉字算2字符）|
+| 特性 | AnySearch | Tavily | 百度搜索 |
+|------|-----------|--------|---------|
+| 认证方式 | 匿名免Key / Bearer Token | Bearer Token | Bearer Token |
+| 免费额度 | 匿名较低（开箱即用）/ 注册Key提额 | 1000 credits/月 | 50次/天 |
+| AI摘要 | 无 | 有（answer字段）| 无 |
+| 图片/视频 | 不支持 | 不支持 | 支持 |
+| 垂直领域搜索 | 支持（tag+params，17个领域）| 不支持 | 无 |
+| 批量并行搜索 | 支持（1-5个查询）| 不支持 | 无 |
+| 网页正文提取 | 支持（转Markdown）| 不支持 | 无 |
+| 中文搜索 | 强（zone=cn）| 一般 | 强 |
+| 英文搜索 | 强（zone=intl）| 强 | 一般 |
+| Query限制 | 无 | 无 | 72字符（汉字算2字符）|
 
 ## 配置说明
 
 ### 引擎模式
-- `auto`：智能路由（默认），中文→百度，英文→Tavily
+- `anysearch`：仅用 AnySearch（默认），免Key匿名即可用，开箱即用
+- `auto`：智能路由（多渠道同时开启时），中文→百度，英文→Tavily，AnySearch 免Key兜底
 - `tavily`：仅用 Tavily
 - `baidu`：仅用百度
 
 ### API Key 获取
+- **AnySearch**：https://anysearch.com/console/api-keys 免费注册（可留空走免Key匿名模式，速率/配额较低）
 - **Tavily**：https://app.tavily.com 免费注册，Key格式 `tvly-xxxxx`
 - **百度千帆**：https://console.bce.baidu.com/qianfan/ais/console/apiKey 创建API Key
   - 无需实名、无需开启后付费，注册即可白嫖每日免费额度
@@ -58,7 +70,8 @@
 ### 配置项
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| Engine | 引擎模式 auto/tavily/baidu | auto |
+| Engine | 引擎模式 anysearch/auto/tavily/baidu | anysearch |
+| AnySearchApiKey | AnySearch API Key（留空走免Key匿名模式）| 空 |
 | MaxResults | 每次返回结果数量 | 5 |
 | SearchDepth | 搜索深度 basic/advanced | basic |
 | SummaryModel | 高性能版模型 | auto_thinking |
@@ -69,6 +82,35 @@
 | ImplicitInjection | 隐式注入（函数文档按需加载，省token）| false |
 
 ## 函数参数
+
+### AnySearch（通用/垂直搜索，免Key默认引擎）
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| query | string | 搜索关键词（必填）|
+| tag | string? | 垂直领域标签，如 finance.quote / academic.paper；不传走通用搜索 |
+| paramsStr | string? | 垂直领域参数，JSON（`{"type":"stock","symbol":"AAPL"}`）或 key=value（`type=stock,symbol=AAPL`）|
+| zone | string? | cn(中文)/intl(国际)，不传自动按语言判断 |
+| language | string? | zh-CN/en 等，不传自动按语言判断 |
+| maxResults | int? | 返回数量，默认5，最多10 |
+
+### AnySearchBatchSearch（并行批量搜索）
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| queries | string | 查询数组 JSON，如 `[{"query":"关键词1","max_results":5},{"query":"关键词2"}]`，最多5个（必填）|
+| tag | string? | 垂直领域标签（共享给所有查询）|
+| paramsStr | string? | 垂直领域参数（共享）|
+| zone | string? | 区域，不传自动按语言判断 |
+| language | string? | 语言，不传自动按语言判断 |
+
+### ExtractWebpage（网页正文提取）
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| url | string | 网页URL（必填），输出正文转Markdown；不支持 PDF/图片等二进制 |
+
+### GetSubDomains（垂直领域目录）
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| domain | string | 领域名，逗号分隔可查多个（必填）。领域：general/resource/social_media/finance/academic/legal/health/business/security/ip/code/energy/environment/agriculture/travel/film/gaming |
 
 ### SmartSummary（AI总结搜索）
 | 参数 | 类型 | 说明 |
@@ -133,3 +175,4 @@ Alife.Plugin.SmartWebSearch/
 - **1.1.0** (2026-07-11)：UI 文本收敛（封印→配置/已注入→已启用/去 Section 前缀）+ 纯 CSS 曼陀罗光轮 + 五芒星 orb + 晶洞角饰视觉增强
 - **4.0.0** (2026-08-09)：适配 Alife 4.0.0 框架（ChatBehaviour + IInteractor）；新增隐式注入开关（函数文档按需加载，省token）；系统提示词瘦身；新增 manifest.json；修复多处健壮性问题（429重试循环、图片下载无大小限制、百度错误码解析异常、JSON字段类型不匹配导致整批结果丢失）
 - **4.2.0** (2026-08-10)：适配 Alife 4.2.0 框架（XmlHandler API 变更：Name 改为只读、构造函数需传 name，改用 `new XmlHandler("SmartWebSearch") { ... }` 初始化器写法）
+- **4.3.0** (2026-08-21)：新增 AnySearch 搜索家族：AnySearch（免Key匿名即可用，支持垂直领域 tag+params 精准搜索）+ AnySearchBatchSearch（并行批量搜1-5个查询）+ ExtractWebpage（网页正文转Markdown）+ GetSubDomains（垂直领域目录）；引擎模式新增 anysearch 并默认单独使用，auto 多渠道时 AnySearch 免Key兜底；UI 新增 AnySearch 配置区块

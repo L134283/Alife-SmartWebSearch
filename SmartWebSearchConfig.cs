@@ -3,8 +3,10 @@ namespace Alife.Plugin.SmartWebSearch;
 public class SmartWebSearchConfig
 {
     // === 引擎模式 ===
-    // "tavily" = 仅Tavily, "baidu" = 仅百度, "auto" = 智能路由(中文→百度, 英文→Tavily, 配额耗尽自动切换)
-    public string Engine { get; set; } = "auto";
+    // "anysearch" = 仅AnySearch(免Key匿名, 默认), "tavily" = 仅Tavily, "baidu" = 仅百度,
+    // "auto" = 智能路由(多渠道同时开启时: 中文→百度, 英文→Tavily, AnySearch免Key兜底)
+    // 单引擎模式(anysearch/tavily/baidu)只注入/启用该引擎相关工具文档，其他引擎工具不注入不注册，省 token
+    public string Engine { get; set; } = "anysearch";
 
     // === Tavily 配置 ===
     // Tavily 端点固定: https://api.tavily.com/search
@@ -22,6 +24,12 @@ public class SmartWebSearchConfig
     public string BaiduApiKey2 { get; set; } = "";
     public string BaiduApiKey3 { get; set; } = "";
     public string BaiduApiKey4 { get; set; } = "";
+
+    // === AnySearch 配置 ===
+    // AnySearch 端点固定: https://api.anysearch.com/v1/search
+    // 认证: 可空。留空走匿名模式(免Key，速率/配额较低，开箱即用)；配置后走 Bearer 认证(更高额度)
+    // 免费注册: https://anysearch.com/console/api-keys，Key 格式 as_sk_xxx
+    public string AnySearchApiKey { get; set; } = "";
 
     // === 通用搜索设置 ===
     // 每次搜索返回的网页结果数量，默认 5
