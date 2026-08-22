@@ -495,7 +495,7 @@ public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSea
         b.CloseElement();
         b.OpenElement(i++, "div");
         b.AddAttribute(i++, "class", "sws-intro-text");
-        b.AddContent(i++, "🜂 多功能AI搜索：AnySearch家族 + AI总结(高性能) + 智能搜索生成(标准) + 双引擎搜索 + 百度热搜 + 智能识图\n🜂 AnySearch 免Key即用：通用/垂直搜索、批量搜索、网页正文提取、垂直领域目录\n🜂 每引擎支持 4 组 API Key（AnySearch 可留空走匿名），额度耗尽自动轮换\n🜂 修改配置后需重新加载模块（设置→插件→刷新）");
+        b.AddContent(i++, "🜂 多功能AI搜索：AnySearch家族 + AI总结(高性能) + 智能搜索生成(标准) + 双引擎搜索 + 百度热搜 + 智能识图 + 图片出处搜索\n🜂 AnySearch 免Key即用：通用/垂直搜索、批量搜索、网页正文提取、垂直领域目录\n🜂 图片出处搜索（独立开关）：番剧截图→作品+集数+时间点；插画/同人本→画师+作品名+原图链接；通用图/游戏截图→网页出处(Yandex)\n🜂 每引擎支持 4 组 API Key（AnySearch 可留空走匿名），额度耗尽自动轮换\n🜂 修改配置后需重新加载模块（设置→插件→刷新）");
         b.CloseElement();
         b.CloseElement();
 
@@ -544,6 +544,20 @@ public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSea
             AddCollapsibleGroup(b, ref i, "百度 Key 2（备用）", () => AddPassword(b, ref i, "百度 Key 2", Configuration.BaiduApiKey2 ?? "", v => Configuration.BaiduApiKey2 = v));
             AddCollapsibleGroup(b, ref i, "百度 Key 3（备用）", () => AddPassword(b, ref i, "百度 Key 3", Configuration.BaiduApiKey3 ?? "", v => Configuration.BaiduApiKey3 = v));
             AddCollapsibleGroup(b, ref i, "百度 Key 4（备用）", () => AddPassword(b, ref i, "百度 Key 4", Configuration.BaiduApiKey4 ?? "", v => Configuration.BaiduApiKey4 = v));
+        });
+
+        // === 图片出处搜索 ===
+        int sourceKeyCount = CountKeys(Configuration.SauceNaoApiKey1, Configuration.SauceNaoApiKey2, Configuration.TraceMoeApiKey1, Configuration.TraceMoeApiKey2);
+        RenderSection(b, ref i, "✵", "图片出处搜索（以图搜源）", sourceKeyCount, () =>
+        {
+            AddToggle(b, ref i, "启用图片出处搜索（独立开关）", Configuration.EnableSourceSearch, v => Configuration.EnableSourceSearch = v);
+            AddHint(b, ref i, "以图搜源：插画/同人本/本子→画师名+作品名+原图链接(SauceNAO)；番剧/动画截图→作品名+集数+时间点(trace.moe)；游戏截图/照片/通用图→相似网页出处(Yandex)\n不传 engine = SauceNAO×Yandex 双引擎并行交叉验证（两边一致的作品/角色/画师信息更可靠），番剧图自动补查 trace.moe\nYandex 为网页接口（无官方API）：自动维护 cookie 会话 + 10秒最小间隔限流防验证码，仅支持图片URL方式\n关闭后 SearchSource 工具不再注入提示词（省 token），重新加载模块后生效");
+            AddHint(b, ref i, "SauceNAO 提供画师名/作品名等详细出处信息（插画/同人本/本子首选引擎）\n免Key也能用：自动走网页匿名模式（配额低：约4次/30秒、100次/天）\n免费注册提额（约200次/天，API更稳定）：https://saucenao.com 登录后在 user.php?page=search-api 获取 Key");
+            AddPassword(b, ref i, "SauceNAO API Key 1", Configuration.SauceNaoApiKey1, v => Configuration.SauceNaoApiKey1 = v);
+            AddCollapsibleGroup(b, ref i, "SauceNAO API Key 2（备用）", () => AddPassword(b, ref i, "SauceNAO API Key 2", Configuration.SauceNaoApiKey2 ?? "", v => Configuration.SauceNaoApiKey2 = v));
+            AddHint(b, ref i, "trace.moe 免Key匿名即可用（配额较低）；Token 可提额\n认证方式：x-trace-token 请求头");
+            AddPassword(b, ref i, "trace.moe Token 1（可留空走匿名）", Configuration.TraceMoeApiKey1, v => Configuration.TraceMoeApiKey1 = v);
+            AddCollapsibleGroup(b, ref i, "trace.moe Token 2（备用）", () => AddPassword(b, ref i, "trace.moe Token 2", Configuration.TraceMoeApiKey2 ?? "", v => Configuration.TraceMoeApiKey2 = v));
         });
 
         // === 搜索设置 ===

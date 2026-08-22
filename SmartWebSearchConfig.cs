@@ -57,6 +57,22 @@ public class SmartWebSearchConfig
     // 缓存过期时间（分钟），默认5分钟
     public int CacheTtlMinutes { get; set; } = 5;
 
+    // === 图片出处搜索设置 ===
+    // 独立开关：开启后注入 SearchSource 工具（以图搜源），
+    // 番剧截图→作品名+集数+时间点(trace.moe)，插画/同人本/漫画→作品名/画师/原图链接(SauceNAO)
+    public bool EnableSourceSearch { get; set; } = true;
+
+    // SauceNAO API Key（可选：无Key自动走网页匿名模式，配额低；有Key走JSON API，约200次/天更稳定）
+    // 免费注册：https://saucenao.com → 登录后 https://saucenao.com/user.php?page=search-api 获取
+    // 认证方式：api_key 参数（非 Header）
+    public string SauceNaoApiKey1 { get; set; } = "";
+    public string SauceNaoApiKey2 { get; set; } = "";
+
+    // trace.moe Token（可选：免Key匿名即可用，匿名配额较低；Token 可提高配额）
+    // 认证方式：x-trace-token 请求头
+    public string TraceMoeApiKey1 { get; set; } = "";
+    public string TraceMoeApiKey2 { get; set; } = "";
+
     // === 注入设置 ===
     // 隐式注入（4.0 新特性）：开启后函数文档不直接注入系统提示词，
     // AI 需先调用 <smartwebsearch/> 按需加载（省 token，渐进式）；

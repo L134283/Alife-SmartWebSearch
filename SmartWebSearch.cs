@@ -3,11 +3,13 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.IO;
@@ -21,7 +23,7 @@ namespace Alife.Plugin.SmartWebSearch;
 
 [Module(
     "网络智能搜索",
-    "多功能AI搜索插件：AnySearch(免Key) + AI总结搜索 + 智能搜索生成 + 双引擎搜索(Tavily+百度) + 百度热搜 + 智能识图，智能路由，多账号轮换，结果缓存。",
+    "多功能AI搜索插件：AnySearch(免Key) + AI总结搜索 + 智能搜索生成 + 双引擎搜索(Tavily+百度) + 百度热搜 + 智能识图 + 图片出处搜索(以图搜源：番剧场景/插画/同人本)，智能路由，多账号轮换，结果缓存。",
     defaultCategory: "Doro的妙妙工具",
     EditorUI = typeof(SmartWebSearchUI))]
 public class SmartWebSearch(
@@ -36,6 +38,22 @@ public class SmartWebSearch(
     private static readonly HttpClient _dlHttp = new(new HttpClientHandler { UseProxy = false })
         { Timeout = TimeSpan.FromSeconds(60) };
 
+    // Yandex 专用客户端：保持 cookie 会话是绕过软反爬的关键，独立实例不与其他引擎混用
+    private static readonly HttpClient _yxHttp = new(new HttpClientHandler
+    {
+        UseProxy = false,
+        UseCookies = true,
+        CookieContainer = new CookieContainer(),
+        AllowAutoRedirect = true,
+        AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli,
+    }) { Timeout = TimeSpan.FromSeconds(60) };
+
+    // Yandex 无官方API走网页接口：频率高会触发验证码，全局串行 + 最小间隔控制
+    private static readonly TimeSpan YandexMinInterval = TimeSpan.FromSeconds(10);
+    private static readonly SemaphoreSlim _yandexGate = new(1, 1);
+    private static DateTime _lastYandexAt = DateTime.MinValue;
+    private static bool _yandexWarmed;
+
     private const string TavilyUrl = "https://api.tavily.com/search";
     private const string BaiduUrl = "https://qianfan.baidubce.com/v2/ai_search/web_search";
     private const string BaiduSummaryUrl = "https://qianfan.baidubce.com/v2/ai_search/web_summary";
@@ -49,9 +67,26 @@ public class SmartWebSearch(
     // 识图下载大小上限：防止下载超大文件打爆内存
     private const int MaxDownloadBytes = 20 * 1024 * 1024;
 
+    // 图片出处搜索（以图搜源）
+    private const string TraceMoeSearchUrl = "https://api.trace.moe/search";
+    private const string SauceNaoSearchUrl = "https://saucenao.com/search.php";
+    // Yandex 必须走 .ru 域：.com 对程序化请求返回"维护中"软拒绝页（实测）
+    private const string YandexImagesSearchUrl = "https://yandex.ru/images/search?rpt=imageview&url={0}";
+
+    // 出处搜索相似度阈值（百分比）：SauceNAO 低于此值的结果过滤（koishi/astrbot 插件同款默认值）
+    private const double SourceMinSimilarity = 40;
+    // trace.moe 相似度（0-1）低于此值的结果过滤
+    private const double TraceMoeMinSimilarity = 0.5;
+    // auto 模式下 SauceNAO 最佳相似度达到此值视为可信，不再补查 trace.moe
+    private const double SauceNaoConfidentSimilarity = 60;
+    // 上传图片大小上限：超出后压缩（两个引擎对上传体积均有限制，4MB 内最稳）
+    private const int MaxUploadBytes = 4 * 1024 * 1024;
+
     // 账号轮换状态：记录已耗尽的账号索引
     private readonly HashSet<int> _exhaustedTavily = new();
     private readonly HashSet<int> _exhaustedBaidu = new();
+    private readonly HashSet<int> _exhaustedSauce = new();
+    private readonly HashSet<int> _exhaustedTrace = new();
     private readonly object _lock = new();
 
     // 搜索结果缓存
@@ -99,6 +134,15 @@ public class SmartWebSearch(
             - 引擎：{{engineDesc}}。
             """;
 
+        // 图片出处搜索独立开关：关闭时不注入规则、不注册工具
+        if (cfg.EnableSourceSearch)
+        {
+            hardRules += """
+                - 图片搜源：插画/同人本/本子问"谁画的/什么作品"→SearchSource(engine=saucenao)；图片是动画画面或用户问"什么番/动漫第几集"→SearchSource(engine=tracemoe)；游戏截图/照片等通用图→SearchSource(engine=yandex)；不确定类型时不传 engine（SauceNAO×Yandex双引擎交叉验证）。不要用搜索工具查出处。
+                """;
+            Log("出处搜索已启用：SearchSource（SauceNAO × Yandex 交叉验证 + trace.moe）");
+        }
+
         // 详细规则：与函数使用细节相关，按引擎动态精简，只提当前引擎能力。
         // 显式模式直接注入；隐式模式放进 handler.Explanation 随文档一并加载，省 token。
         var detailedRules = cfg.Engine switch
@@ -143,7 +187,7 @@ public class SmartWebSearch(
     {
         var discovered = new XmlHandler(this);
         // 按引擎配置过滤：单独开启某引擎时，其他引擎的工具不注入文档也不注册调用，节省 token
-        var exposed = FilterFunctionsByEngine(discovered.Functions, cfg.Engine);
+        var exposed = FilterFunctionsByEngine(discovered.Functions, cfg.Engine, cfg.EnableSourceSearch);
         // 单引擎模式下裁剪 Search 函数文档：只保留当前引擎相关参数，避免向 AI 暴露不可用的引擎路由/专属参数
         exposed = TrimSearchForEngine(exposed, cfg.Engine);
 
@@ -152,7 +196,7 @@ public class SmartWebSearch(
             : DocumentMode.Explicit;
         var handler = new XmlHandler("SmartWebSearch")
         {
-            Description = HandlerDescriptionForEngine(cfg.Engine),
+            Description = HandlerDescriptionForEngine(cfg.Engine, cfg.EnableSourceSearch),
             // 隐式模式：详细规则随 <smartwebsearch/> 加载的文档一并输出；显式模式保持 null 避免重复注入
             Explanation = explanation,
             Functions = exposed,
@@ -165,12 +209,20 @@ public class SmartWebSearch(
     }
 
     /// <summary>按引擎生成 handler 描述：单引擎模式不提及未注入的工具，避免误导。</summary>
-    static string HandlerDescriptionForEngine(string engine) => engine switch
+    static string HandlerDescriptionForEngine(string engine, bool enableSourceSearch = true) => engine switch
     {
-        "anysearch" => "网络智能搜索：AnySearch 通用/垂直搜索、批量搜索、网页提取、垂直目录。",
-        "baidu" => "网络智能搜索：百度 AI总结 + 智能搜索 + 双引擎搜索 + 热搜 + 识图。",
-        "tavily" => "网络智能搜索：Tavily 搜索。",
-        _ => "网络智能搜索：AnySearch + AI总结 + 双引擎搜索 + 热搜 + 识图。"
+        "anysearch" => enableSourceSearch
+            ? "网络智能搜索：AnySearch 通用/垂直搜索、批量搜索、网页提取、垂直目录、图片出处搜索。"
+            : "网络智能搜索：AnySearch 通用/垂直搜索、批量搜索、网页提取、垂直目录。",
+        "baidu" => enableSourceSearch
+            ? "网络智能搜索：百度 AI总结 + 智能搜索 + 双引擎搜索 + 热搜 + 识图 + 图片出处搜索。"
+            : "网络智能搜索：百度 AI总结 + 智能搜索 + 双引擎搜索 + 热搜 + 识图。",
+        "tavily" => enableSourceSearch
+            ? "网络智能搜索：Tavily 搜索 + 图片出处搜索。"
+            : "网络智能搜索：Tavily 搜索。",
+        _ => enableSourceSearch
+            ? "网络智能搜索：AnySearch + AI总结 + 双引擎搜索 + 热搜 + 识图 + 图片出处搜索。"
+            : "网络智能搜索：AnySearch + AI总结 + 双引擎搜索 + 热搜 + 识图。"
     };
 
     /// <summary>
@@ -222,19 +274,29 @@ public class SmartWebSearch(
     /// 按引擎配置过滤工具：单独开启某引擎时，其他引擎的工具不注入文档也不注册调用，节省 token。
     /// 函数名与 XmlHandler 反射一致（方法名小写）。
     /// auto：全部注入；anysearch：AnySearch 家族 + Search；baidu：百度系 + Search；tavily：仅 Search。
+    /// SearchSource（图片出处搜索）为独立功能，不依赖上述引擎，各模式下按独立开关注入。
     /// </summary>
-    static List<XmlFunction> FilterFunctionsByEngine(List<XmlFunction> all, string engine)
+    static List<XmlFunction> FilterFunctionsByEngine(List<XmlFunction> all, string engine, bool enableSourceSearch)
     {
+        List<XmlFunction> Filter(params string[] names) =>
+            all.Where(f => names.Contains(f.Name)).ToList();
+
         switch (engine)
         {
             case "anysearch":
-                return all.Where(f => f.Name is "anysearch" or "anysearchbatchsearch" or "extractwebpage" or "getsubdomains" or "search").ToList();
+                return enableSourceSearch
+                    ? Filter("anysearch", "anysearchbatchsearch", "extractwebpage", "getsubdomains", "search", "searchsource")
+                    : Filter("anysearch", "anysearchbatchsearch", "extractwebpage", "getsubdomains", "search");
             case "baidu":
-                return all.Where(f => f.Name is "search" or "smartsummary" or "smartchatsearch" or "hotsearch" or "imagerecognition").ToList();
+                return enableSourceSearch
+                    ? Filter("search", "smartsummary", "smartchatsearch", "hotsearch", "imagerecognition", "searchsource")
+                    : Filter("search", "smartsummary", "smartchatsearch", "hotsearch", "imagerecognition");
             case "tavily":
-                return all.Where(f => f.Name == "search").ToList();
+                return enableSourceSearch
+                    ? Filter("search", "searchsource")
+                    : Filter("search");
             default: // auto：多渠道全注入
-                return all;
+                return enableSourceSearch ? all.ToList() : all.Where(f => f.Name != "searchsource").ToList();
         }
     }
 
@@ -1117,10 +1179,16 @@ public class SmartWebSearch(
     }
 
     /// <summary>
-    /// 下载图片并转为base64，超过100KB自动压缩。
-    /// 支持 HTTP(S) URL 与 data URI；单次下载限 20MB 防止内存打爆。
+    /// 下载图片并转为base64，超过100KB自动压缩（智能识图用）。
     /// </summary>
     static async Task<string> DownloadImageAsBase64Async(string imageUrl)
+        => CompressToBase64(await DownloadImageBytesAsync(imageUrl));
+
+    /// <summary>
+    /// 下载图片原始字节（不压缩），供搜源等依赖画质的场景使用。
+    /// 支持 HTTP(S) URL 与 data URI；单次下载限 20MB 防止内存打爆。
+    /// </summary>
+    static async Task<byte[]> DownloadImageBytesAsync(string imageUrl)
     {
         // data URI：直接解码，无需网络
         if (imageUrl.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
@@ -1135,7 +1203,7 @@ public class SmartWebSearch(
             catch (FormatException ex) { throw new Exception("data URI 的 Base64 内容无效", ex); }
             if (dataBytes.Length > MaxDownloadBytes)
                 throw new Exception($"图片过大 ({dataBytes.Length / 1024 / 1024}MB > {MaxDownloadBytes / 1024 / 1024}MB)");
-            return CompressToBase64(dataBytes);
+            return dataBytes;
         }
 
         using var req = new HttpRequestMessage(HttpMethod.Get, imageUrl);
@@ -1160,7 +1228,7 @@ public class SmartWebSearch(
                 throw new Exception($"图片过大 (> {MaxDownloadBytes / 1024 / 1024}MB)");
             ms.Write(buffer, 0, read);
         }
-        return CompressToBase64(ms.ToArray());
+        return ms.ToArray();
     }
 
     /// <summary>
@@ -1198,6 +1266,748 @@ public class SmartWebSearch(
             { Log("识图: 压缩到极限"); return compressed; }
             width = nextWidth; height = nextHeight;
         }
+    }
+
+    #endregion
+
+    #region 图片出处搜索（以图搜源）
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("图片出处搜索（以图搜源）：插画/同人本/漫画/本子→作品名+画师名+原图链接(SauceNAO)；番剧/动画截图→作品名+集数+时间点(trace.moe，仅当图片是动画画面或用户问什么番/动漫时使用)；游戏截图/照片/通用图片→包含此图的网页出处(Yandex)。不传engine自动：SauceNAO×Yandex双引擎并行交叉验证（结果互证更可靠），番剧图自动补查trace.moe。用户问图片出处/谁画的/什么作品时调用；单纯识别图里有什么内容用识图(ImageRecognition)。")]
+    public async Task SearchSource(
+        [Description("图片URL")] string imageUrl,
+        [Description("引擎：saucenao=插画/同人本/画师，tracemoe=番剧/动画截图，yandex=游戏截图/通用图，不传=双引擎交叉验证")] string? engine = null,
+        [Description("每个引擎返回结果数，默认3，最多6")] int? maxResults = null)
+    {
+        if (string.IsNullOrWhiteSpace(imageUrl)) { interactor.Poke("图片URL不能为空"); return; }
+
+        var cfg = Configuration ?? new SmartWebSearchConfig();
+        if (!cfg.EnableSourceSearch) { interactor.Poke("图片出处搜索已在插件设置中关闭"); return; }
+
+        var results = Math.Clamp(maxResults ?? 3, 1, 6);
+        var eng = engine?.Trim().ToLowerInvariant();
+        if (eng is not (null or "" or "auto" or "saucenao" or "tracemoe" or "yandex"))
+        { interactor.Poke($"无效引擎: {engine}，可选: saucenao / tracemoe / yandex / auto"); return; }
+
+        // 下载原始字节：搜源依赖画质，只在超上传上限时才压缩（识图的100KB压缩对搜源太狠）
+        byte[] imageBytes;
+        try
+        {
+            Log("搜源: 下载图片...");
+            imageBytes = EnsureUnderUploadLimit(await DownloadImageBytesAsync(imageUrl));
+            Log($"搜源: 图片 {imageBytes.Length / 1024}KB");
+        }
+        catch (Exception ex) { interactor.Poke($"图片下载失败: {ex.Message}"); return; }
+
+        // data URI 可能极长，不入缓存键
+        var cacheable = !imageUrl.StartsWith("data:", StringComparison.OrdinalIgnoreCase);
+        var cacheKey = cacheable ? $"source:{eng ?? "auto"}:{imageUrl}:{results}" : null;
+        if (cacheKey != null && TryGetCached(cfg, cacheKey, out var cached))
+        { Log("缓存命中(搜源)"); interactor.Poke(cached); return; }
+
+        var hasSauce = GetSauceKeys(cfg).Any(k => !string.IsNullOrWhiteSpace(k));
+        var isAuto = eng is null or "";
+        var useSauce = isAuto || eng is "auto" or "saucenao";
+
+        var sb = new StringBuilder(eng switch
+        {
+            "tracemoe" => "## 图片出处搜索结果（番剧场景识别 trace.moe）",
+            "saucenao" => "## 图片出处搜索结果（SauceNAO）",
+            "yandex" => "## 图片出处搜索结果（Yandex）",
+            _ => "## 图片出处搜索结果（SauceNAO × Yandex 交叉验证）",
+        });
+        var anySuccess = false;
+        double sauceBest = 0;
+        var gotSauce = false;
+        var gotYandex = false;
+
+        // SauceNAO：pixiv/danbooru/nhentai 综合库（画师名/作品名/原图链接）
+        // 有Key走JSON API（稳定高配额）；无Key或API全败自动降级网页匿名模式（免Key，配额较低）
+        if (useSauce)
+        {
+            string? sauceFormatted = null;
+            if (hasSauce)
+            {
+                var (formatted, best) = await SauceNaoSearchAsync(imageBytes, results, cfg);
+                if (formatted != null) { sauceFormatted = formatted; sauceBest = best; }
+            }
+
+            if (sauceFormatted == null)
+            {
+                var (formatted, best) = await SauceNaoWebSearchAsync(imageBytes, results);
+                if (formatted != null)
+                {
+                    sauceFormatted = (hasSauce
+                        ? "（SauceNAO API 账号均不可用，已降级网页匿名模式）\n"
+                        : "") + formatted;
+                    sauceBest = best;
+                }
+            }
+
+            if (sauceFormatted != null)
+            { sb.AppendLine(); sb.AppendLine(sauceFormatted); anySuccess = true; gotSauce = true; }
+            else
+                sb.AppendLine("\n（SauceNAO 不可用：API 未配置/额度耗尽，且网页匿名模式失败（可能限流），稍后可重试）");
+        }
+
+        // 并行补查：
+        // auto（交叉验证模式）：Yandex 无条件并行，与 SauceNAO 结果互证；
+        //   trace.moe 仅在 SauceNAO 低相似度/未命中时加入（番剧场景兜底，番剧图保持 trace.moe 主导）
+        // 显式 tracemoe/yandex 只跑指定引擎；显式 saucenao 不跑其它
+        // Yandex 仅支持 URL 方式（其服务器自行抓图），data URI 输入时跳过
+        var runTrace = eng == "tracemoe" || (isAuto && (!gotSauce || sauceBest < SauceNaoConfidentSimilarity));
+        var runYandex = (eng == "yandex" || isAuto) && cacheable;
+        if (runTrace || runYandex)
+        {
+            var traceTask = runTrace
+                ? TraceMoeSearchAsync(imageBytes, results, cfg)
+                : Task.FromResult<(string? formatted, double best)>((null, 0));
+            var yandexTask = runYandex
+                ? YandexSearchAsync(imageUrl, results)
+                : Task.FromResult<(string? formatted, double best)>((null, 0));
+            await Task.WhenAll(traceTask, yandexTask);
+
+            if (traceTask.Result.formatted != null) { sb.AppendLine(); sb.AppendLine(traceTask.Result.formatted); anySuccess = true; }
+            else if (eng == "tracemoe") sb.AppendLine("\n（trace.moe 搜索失败：额度耗尽或网络异常）");
+
+            if (yandexTask.Result.formatted != null) { sb.AppendLine(); sb.AppendLine(yandexTask.Result.formatted); anySuccess = true; gotYandex = true; }
+            else if (eng == "yandex") sb.AppendLine("\n（Yandex 搜索失败：被限流或网络异常，稍后重试）");
+        }
+
+        // 交叉验证提示：双引擎都有结果时，引导 AI 比对共现信息再下结论
+        if (isAuto && gotSauce && gotYandex)
+            sb.AppendLine("\n（交叉验证：SauceNAO 与 Yandex 结果中一致的作品/角色/画师/来源信息可信度更高，请综合比对后给出结论）");
+
+        if (!anySuccess)
+        { interactor.Poke("图片出处搜索失败：所有可用引擎均未返回结果，请检查 API Key 配置或稍后再试"); return; }
+
+        var output = sb.ToString().Trim();
+        if (cacheKey != null) SaveCache(cfg, cacheKey, output);
+        interactor.Poke(output);
+    }
+
+    /// <summary>
+    /// SauceNAO 搜源：账号轮换（403无效Key/限额切换）。返回 (格式化结果, 最佳相似度)；全失败返回 null。
+    /// </summary>
+    async Task<(string? formatted, double best)> SauceNaoSearchAsync(byte[] imageBytes, int maxResults, SmartWebSearchConfig cfg)
+    {
+        lock (_lock) _exhaustedSauce.Clear();
+        var keys = GetSauceKeys(cfg);
+
+        for (int attempt = 0; attempt < keys.Count; attempt++)
+        {
+            var (idx, key) = GetNextKey(keys, _exhaustedSauce);
+            if (key == null) break;
+
+            try
+            {
+                Log($"SauceNAO[{idx + 1}]");
+                using var content = new MultipartFormDataContent();
+                var fileContent = new ByteArrayContent(imageBytes);
+                fileContent.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
+                content.Add(fileContent, "file", "image.jpg");
+                content.Add(new StringContent("2"), "output_type");          // JSON 输出
+                content.Add(new StringContent("999"), "db");                 // 全部索引库（含同人/本子库）
+                content.Add(new StringContent(maxResults.ToString()), "numres");
+                content.Add(new StringContent(key), "api_key");
+
+                using var resp = await _dlHttp.PostAsync(SauceNaoSearchUrl, content);
+                var raw = await resp.Content.ReadAsStringAsync();
+
+                // 403：匿名访问或 Key 无效，切换下一个账号
+                if ((int)resp.StatusCode == 403)
+                {
+                    Log($"SauceNAO 账号{idx + 1} Key无效或被拒");
+                    lock (_lock) _exhaustedSauce.Add(idx);
+                    continue;
+                }
+
+                // 429：30秒频率限额，直接换号（重试大概率还限）
+                if ((int)resp.StatusCode == 429)
+                {
+                    Log($"SauceNAO 账号{idx + 1} 频率限制，切换下一个");
+                    lock (_lock) _exhaustedSauce.Add(idx);
+                    continue;
+                }
+
+                if (!resp.IsSuccessStatusCode)
+                {
+                    Log($"SauceNAO 请求失败 (HTTP {(int)resp.StatusCode})");
+                    continue;
+                }
+
+                var (formatted, best, err) = FormatSauceNaoResults(raw, maxResults);
+                if (err != null)
+                {
+                    Log($"SauceNAO 账号{idx + 1}: {err}");
+                    // 该账号本次已失败（限额/额度/Key无效），标记跳过避免同轮重试
+                    lock (_lock) _exhaustedSauce.Add(idx);
+                    continue;
+                }
+                Log($"SauceNAO[{idx + 1}]成功");
+                return (formatted, best);
+            }
+            catch (TaskCanceledException) { Log($"SauceNAO 账号{idx + 1}超时"); continue; }
+            catch (Exception ex) { Log($"SauceNAO 账号{idx + 1}异常: {ex.Message}"); continue; }
+        }
+        return (null, 0);
+    }
+
+    /// <summary>
+    /// SauceNAO 网页版匿名搜源（无Key降级路径）：API 匿名返回403，但网页版匿名可用
+    /// （配额低：约4次/30秒、100次/天）。返回 (格式化结果, 最佳相似度)；失败返回 null。
+    /// </summary>
+    async Task<(string? formatted, double best)> SauceNaoWebSearchAsync(byte[] imageBytes, int maxResults)
+    {
+        try
+        {
+            Log("SauceNAO[网页匿名]");
+            using var content = new MultipartFormDataContent();
+            var fileContent = new ByteArrayContent(imageBytes);
+            fileContent.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
+            content.Add(fileContent, "file", "image.jpg");
+            content.Add(new StringContent("999"), "db");
+            // 网页默认返回8条，多要一些再按相似度过滤
+            content.Add(new StringContent(Math.Max(maxResults, 8).ToString()), "numres");
+            using var req = new HttpRequestMessage(HttpMethod.Post, SauceNaoSearchUrl) { Content = content };
+            req.Headers.TryAddWithoutValidation("User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+            using var resp = await _dlHttp.SendAsync(req);
+            var html = await resp.Content.ReadAsStringAsync();
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                Log($"SauceNAO 网页版请求失败 (HTTP {(int)resp.StatusCode})");
+                return (null, 0);
+            }
+
+            var (formatted, best, err) = FormatSauceNaoHtmlResults(html, maxResults);
+            if (err != null) { Log($"SauceNAO 网页版: {err}"); return (null, 0); }
+            Log("SauceNAO 网页版搜索成功");
+            return (formatted, best);
+        }
+        catch (TaskCanceledException) { Log("SauceNAO 网页版超时"); return (null, 0); }
+        catch (Exception ex) { Log($"SauceNAO 网页版异常: {ex.Message}"); return (null, 0); }
+    }
+
+    /// <summary>
+    /// 解析 SauceNAO 网页版结果 HTML：结果块为 div.result（显示）/ div.result.hidden（低相似度，数据完整）；
+    /// 键值对在 resultcontentcolumn 中，模式为 &lt;strong&gt;label: &lt;/strong&gt; + 文本或链接
+    /// （pixiv ID / Member 画师 / Material 所属作品 / Characters 角色 / Source 来源等）。
+    /// </summary>
+    static (string formatted, double best, string? error) FormatSauceNaoHtmlResults(string html, int maxResults)
+    {
+        try
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("### SauceNAO 通用搜源");
+
+            double best = 0;
+            int n = 1;
+            foreach (Match block in Regex.Matches(html,
+                @"<div class=""result(?: hidden)?"".*?(?=<div class=""result(?: hidden)?""|$)",
+                RegexOptions.Singleline))
+            {
+                var simMatch = Regex.Match(block.Value, @"resultsimilarityinfo"">([\d.]+)%");
+                if (!simMatch.Success) continue; // 消息块/自身上传图块，无相似度
+                var similarity = float.Parse(simMatch.Groups[1].Value, CultureInfo.InvariantCulture);
+                best = Math.Max(best, similarity);
+                if (similarity < SourceMinSimilarity || n > maxResults) continue;
+
+                var imgTitle = Regex.Match(block.Value, @"<img[^>]*title=""(Index #[^""]*)""").Groups[1].Value;
+                var dashIdx = imgTitle.IndexOf(" - ");
+                var indexName = ShortIndexName(dashIdx >= 0 ? imgTitle[..dashIdx] : imgTitle);
+                var title = StripHtml(Regex.Match(block.Value,
+                    @"<div class=""resulttitle"">(.*?)</div>", RegexOptions.Singleline).Groups[1].Value);
+
+                sb.AppendLine($"#### {n}. {(string.IsNullOrWhiteSpace(title) ? "未识别标题" : title)}（相似度 {similarity:F1}%）");
+                if (!string.IsNullOrWhiteSpace(indexName)) sb.AppendLine($"来源库: {indexName}");
+
+                var col = Regex.Match(block.Value,
+                    @"<div class=""resultcontentcolumn"">(.*?)</div>", RegexOptions.Singleline).Groups[1].Value;
+                foreach (Match pair in Regex.Matches(col,
+                    @"<strong>([^<]*?)\s*:\s*</strong>\s*(?:<a[^>]*href=""([^""]+)""[^>]*>([^<]*)</a>|([^<]*))"))
+                {
+                    var label = pair.Groups[1].Value.Trim();
+                    var href = pair.Groups[2].Value;
+                    var value = StripHtml(pair.Groups[3].Success ? pair.Groups[3].Value : pair.Groups[4].Value);
+                    if (string.IsNullOrWhiteSpace(label) || string.IsNullOrWhiteSpace(value)) continue;
+
+                    var friendly = label.ToLowerInvariant() switch
+                    {
+                        "member" => "画师",
+                        "creator" => "作者/画师",
+                        "author" => "作者",
+                        "artist" => "画师",
+                        "material" => "所属作品",
+                        "characters" => "角色",
+                        "source" => "来源",
+                        "pixiv id" => "Pixiv 作品",
+                        "eng. title" => "英文标题",
+                        "jap. title" => "日文标题",
+                        "est time" => "出现时间",
+                        _ => label,
+                    };
+                    var link = NormalizeSauceLink(href);
+                    sb.AppendLine(string.IsNullOrWhiteSpace(link)
+                        ? $"{friendly}: {value}"
+                        : $"{friendly}: {value} → {link}");
+                }
+                sb.AppendLine();
+                n++;
+            }
+            if (n == 1)
+                sb.AppendLine("未找到匹配结果（或匿名配额已用完：网页模式约4次/30秒、100次/天，免费注册 API Key 可提额）");
+            return (sb.ToString().Trim(), best, null);
+        }
+        catch (Exception ex) { return ("", 0, $"结果解析异常: {ex.Message}"); }
+    }
+
+    /// <summary>SauceNAO 老链接规范化：member_illust.php?illust_id=X → artworks/X，member.php?id=X → users/X。</summary>
+    static string NormalizeSauceLink(string href)
+    {
+        if (string.IsNullOrWhiteSpace(href)) return "";
+        var m = Regex.Match(href, @"illust_id=(\d+)");
+        if (m.Success) return $"https://www.pixiv.net/artworks/{m.Groups[1].Value}";
+        m = Regex.Match(href, @"member\.php\?id=(\d+)");
+        if (m.Success) return $"https://www.pixiv.net/users/{m.Groups[1].Value}";
+        return href;
+    }
+
+    /// <summary>
+    /// trace.moe 番剧场景识别：Token 可选（匿名即可用），Token 失败自动回退匿名。
+    /// 返回 (格式化结果, 最佳相似度)；全失败返回 null。
+    /// </summary>
+    async Task<(string? formatted, double best)> TraceMoeSearchAsync(byte[] imageBytes, int maxResults, SmartWebSearchConfig cfg)
+    {
+        var keys = GetTraceKeys(cfg).Where(k => !string.IsNullOrWhiteSpace(k)).ToList();
+        lock (_lock) _exhaustedTrace.Clear();
+
+        // Token 优先轮换，匿名兜底放最后
+        var attempts = new List<string?>(keys) { null };
+        foreach (var key in attempts)
+        {
+            var idx = key == null ? -1 : keys.IndexOf(key);
+            if (key != null && _exhaustedTrace.Contains(idx)) continue;
+
+            try
+            {
+                Log(key == null ? "trace.moe[匿名]" : $"trace.moe[{idx + 1}]");
+                using var content = new MultipartFormDataContent();
+                var fileContent = new ByteArrayContent(imageBytes);
+                fileContent.Headers.ContentType = new MediaTypeHeaderValue("image/jpeg");
+                content.Add(fileContent, "image", "image.jpg");
+                // anilistInfo：返回完整 AniList 信息（多语言标题/成人标记/详情页）；cutBorders：裁掉截图黑边提升命中率
+                using var req = new HttpRequestMessage(HttpMethod.Post, TraceMoeSearchUrl + "?anilistInfo&cutBorders") { Content = content };
+                if (key != null) req.Headers.TryAddWithoutValidation("x-trace-token", key);
+
+                using var resp = await _dlHttp.SendAsync(req);
+                var raw = await resp.Content.ReadAsStringAsync();
+
+                if ((int)resp.StatusCode == 429)
+                {
+                    Log($"trace.moe 频率限制/额度耗尽 (429){(key == null ? "" : "，切换下一个")}");
+                    if (key != null) { lock (_lock) _exhaustedTrace.Add(idx); continue; }
+                    continue;
+                }
+                if ((int)resp.StatusCode == 401 || (int)resp.StatusCode == 403)
+                {
+                    Log($"trace.moe Token 无效 (HTTP {(int)resp.StatusCode})");
+                    if (key != null) { lock (_lock) _exhaustedTrace.Add(idx); continue; }
+                    continue;
+                }
+                if (!resp.IsSuccessStatusCode)
+                {
+                    Log($"trace.moe 请求失败 (HTTP {(int)resp.StatusCode})");
+                    continue;
+                }
+
+                var (formatted, best, err) = FormatTraceMoeResults(raw, maxResults);
+                if (err != null) { Log($"trace.moe: {err}"); continue; }
+                Log("trace.moe 搜索成功");
+                return (formatted, best);
+            }
+            catch (TaskCanceledException) { Log("trace.moe 超时"); continue; }
+            catch (Exception ex) { Log($"trace.moe 异常: {ex.Message}"); continue; }
+        }
+        return (null, 0);
+    }
+
+    /// <summary>去除 HTML 标签并压缩空白。</summary>
+    static string StripHtml(string html)
+    {
+        var text = Regex.Replace(html, @"<[^>]+>", " ");
+        return Regex.Replace(text, @"\s+", " ").Trim();
+    }
+
+    /// <summary>
+    /// Yandex 相似网页搜源（通用兜底）：无官方API，模拟浏览器请求网页接口（.ru 域 + cookie 会话 + 全套请求头）。
+    /// 仅支持 URL 方式（Yandex 服务器自行抓图）；全局串行 + 最小间隔防验证码。
+    /// 返回 (格式化结果, 0)；失败/被软拒绝返回 null。
+    /// </summary>
+    async Task<(string? formatted, double best)> YandexSearchAsync(string imageUrl, int maxResults)
+    {
+        await _yandexGate.WaitAsync();
+        try
+        {
+            // 频率控制：距上次调用不足最小间隔则等待
+            var sinceLast = DateTime.Now - _lastYandexAt;
+            if (sinceLast >= TimeSpan.Zero && sinceLast < YandexMinInterval)
+            {
+                Log($"Yandex: 限流等待 {(YandexMinInterval - sinceLast).TotalSeconds:F0}s");
+                await Task.Delay(YandexMinInterval - sinceLast);
+            }
+
+            // cookie 会话预热（一次）：主页 → images，模拟真实浏览器访问链
+            if (!_yandexWarmed)
+            {
+                await YandexGetAsync("https://yandex.ru/", null);
+                await YandexGetAsync("https://yandex.ru/images", "https://yandex.ru/");
+                _yandexWarmed = true;
+                Log("Yandex: 会话预热完成");
+            }
+
+            var url = string.Format(YandexImagesSearchUrl, Uri.EscapeDataString(imageUrl));
+            var html = await YandexGetAsync(url, "https://yandex.ru/images/");
+            _lastYandexAt = DateTime.Now;
+
+            // 软拒绝检测：反爬时返回极小的"维护中"壳页（约1.8KB），丢弃会话下次重预热
+            if (html.Length < 5000)
+            {
+                Log($"Yandex: 被软拒绝（len={html.Length}），重置会话");
+                _yandexWarmed = false;
+                return (null, 0);
+            }
+
+            var (formatted, _, err) = FormatYandexResults(html, maxResults);
+            if (err != null) { Log($"Yandex: {err}"); return (null, 0); }
+            Log("Yandex 搜索成功");
+            return (formatted, 0);
+        }
+        catch (TaskCanceledException) { Log("Yandex 超时"); return (null, 0); }
+        catch (Exception ex) { Log($"Yandex 异常: {ex.Message}"); return (null, 0); }
+        finally { _yandexGate.Release(); }
+    }
+
+    /// <summary>Yandex GET：完整浏览器请求头（UA/sec-ch-ua/sec-fetch），cookie 由容器自动携带。</summary>
+    static async Task<string> YandexGetAsync(string url, string? referer)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        req.Headers.TryAddWithoutValidation("User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+        req.Headers.TryAddWithoutValidation("Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8");
+        req.Headers.TryAddWithoutValidation("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8");
+        req.Headers.TryAddWithoutValidation("sec-ch-ua", "\"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"");
+        req.Headers.TryAddWithoutValidation("sec-ch-ua-mobile", "?0");
+        req.Headers.TryAddWithoutValidation("sec-ch-ua-platform", "\"Windows\"");
+        req.Headers.TryAddWithoutValidation("Upgrade-Insecure-Requests", "1");
+        req.Headers.TryAddWithoutValidation("Sec-Fetch-Dest", "document");
+        req.Headers.TryAddWithoutValidation("Sec-Fetch-Mode", "navigate");
+        req.Headers.TryAddWithoutValidation("Sec-Fetch-Site", referer != null ? "same-origin" : "none");
+        req.Headers.TryAddWithoutValidation("Sec-Fetch-User", "?1");
+        if (referer != null) req.Headers.TryAddWithoutValidation("Referer", referer);
+        using var resp = await _yxHttp.SendAsync(req);
+        return await resp.Content.ReadAsStringAsync();
+    }
+
+    /// <summary>
+    /// 解析 Yandex 反搜结果页：CbirSites 列表 = 包含此图的网页（标题/来源域名/描述/链接），
+    /// 三类节点在同一结果块内出现顺序一致，按索引 zip 对齐。
+    /// </summary>
+    static (string formatted, double best, string? error) FormatYandexResults(string html, int maxResults)
+    {
+        try
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("### Yandex 相似网页搜源");
+
+            var titles = Regex.Matches(html,
+                @"CbirSites-ItemTitle""><a href=""([^""]+)""[^>]*>(.*?)</a>", RegexOptions.Singleline);
+            var domains = Regex.Matches(html,
+                @"CbirSites-ItemDomain[^""]*""[^>]*><div[^>]*></div>([^<]+)</a>", RegexOptions.Singleline);
+            var descs = Regex.Matches(html,
+                @"CbirSites-ItemDescription""[^>]*>(.*?)</div>", RegexOptions.Singleline);
+
+            var count = Math.Min(titles.Count, domains.Count);
+            if (count == 0)
+            {
+                sb.AppendLine("未找到包含此图的网页（Yandex 索引内无相似图）");
+                return (sb.ToString().Trim(), 0, null);
+            }
+
+            var shown = Math.Min(count, maxResults);
+            for (int i = 0; i < shown; i++)
+            {
+                var link = WebUtility.HtmlDecode(titles[i].Groups[1].Value);
+                link = Regex.Replace(link, @"&?utm_[a-z]+=[^&]*", "").TrimEnd('?', '&');
+                var title = StripHtml(WebUtility.HtmlDecode(titles[i].Groups[2].Value));
+                var domain = WebUtility.HtmlDecode(domains[i].Groups[1].Value).Trim();
+                var desc = i < descs.Count ? StripHtml(WebUtility.HtmlDecode(descs[i].Groups[1].Value)) : "";
+
+                sb.AppendLine($"#### {i + 1}. {title}（{domain}）");
+                if (!string.IsNullOrWhiteSpace(desc)) sb.AppendLine($"描述: {desc}");
+                if (!string.IsNullOrWhiteSpace(link)) sb.AppendLine($"链接: {link}");
+                sb.AppendLine();
+            }
+            return (sb.ToString().Trim(), 0, null);
+        }
+        catch (Exception ex) { return ("", 0, $"结果解析异常: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// 格式化 SauceNAO JSON 结果：header.status 错误码映射 + 相似度过滤 + 多索引字段提取。
+    /// data 字段因来源库而异（pixiv: member_name/pixiv_id；danbooru: creator/characters/material；nhentai: eng_name/jp_name）。
+    /// </summary>
+    static (string formatted, double best, string? error) FormatSauceNaoResults(string raw, int maxResults)
+    {
+        try
+        {
+            var node = JsonNode.Parse(raw);
+            var header = node?["header"];
+
+            var status = JInt(header, "status");
+            if (status != 0)
+            {
+                var message = header?["message"]?.ToString() ?? "";
+                var friendly = status switch
+                {
+                    3 => "搜索频率过高（30秒限额）",
+                    4 => "今日搜索额度已用完",
+                    -1 => "API Key 无效",
+                    _ => string.IsNullOrWhiteSpace(message) ? $"未知错误 (status={status})" : message,
+                };
+                return ("", 0, friendly);
+            }
+
+            var results = node?["results"]?.AsArray();
+            var sb = new StringBuilder();
+            sb.AppendLine("### SauceNAO 通用搜源");
+
+            if (results == null || results.Count == 0)
+            {
+                sb.AppendLine("未找到匹配结果（图片可能未被收录，或画质/裁切/镜像差异过大）");
+                return (sb.ToString().Trim(), 0, null);
+            }
+
+            double best = 0;
+            int n = 1;
+            foreach (var r in results)
+            {
+                var h = r?["header"];
+                var data = r?["data"];
+                var similarity = JFloat(h, "similarity");
+                best = Math.Max(best, similarity);
+                if (similarity < SourceMinSimilarity || n > maxResults) continue;
+
+                var title = FirstNonEmpty(data?["title"], data?["jp_name"], data?["eng_name"],
+                    data?["material"], data?["source"], data?["member_name"]) ?? "未识别标题";
+                var material = FirstNonEmpty(data?["material"]);
+                var characters = FirstNonEmpty(data?["characters"]);
+                var artist = FirstNonEmpty(data?["member_name"], data?["creator"], data?["author_name"]);
+
+                sb.AppendLine($"#### {n}. {title}（相似度 {similarity:F1}%）");
+                var indexName = ShortIndexName(h?["index_name"]?.ToString());
+                if (!string.IsNullOrWhiteSpace(indexName)) sb.AppendLine($"来源库: {indexName}");
+                if (!string.IsNullOrWhiteSpace(artist)) sb.AppendLine($"画师/作者: {artist}");
+                if (!string.IsNullOrWhiteSpace(material) && material != title) sb.AppendLine($"所属作品: {material}");
+                if (!string.IsNullOrWhiteSpace(characters)) sb.AppendLine($"角色: {characters}");
+                var src = data?["source"]?.ToString();
+                if (!string.IsNullOrWhiteSpace(src) && src != title) sb.AppendLine($"原始来源: {src}");
+                var part = data?["part"]?.ToString();
+                if (!string.IsNullOrWhiteSpace(part)) sb.AppendLine($"部分: {part}");
+
+                // 链接：ext_urls 兜底补全 pixiv 作品/画师主页
+                var links = new List<string>();
+                if (data?["ext_urls"]?.AsArray() is { } extUrls)
+                    links.AddRange(extUrls.Select(u => u?.ToString()).Where(s => !string.IsNullOrWhiteSpace(s))!);
+                var pixivId = JLong(data, "pixiv_id");
+                if (pixivId > 0)
+                {
+                    var artwork = $"https://www.pixiv.net/artworks/{pixivId}";
+                    if (!links.Any(l => l.Contains("pixiv.net"))) links.Insert(0, artwork);
+                    var memberId = JLong(data, "member_id");
+                    if (memberId > 0 && !string.IsNullOrWhiteSpace(artist))
+                        links.Add($"画师主页 https://www.pixiv.net/users/{memberId}");
+                }
+                if (links.Count > 0) sb.AppendLine($"链接: {string.Join(" | ", links.Distinct())}");
+                sb.AppendLine();
+                n++;
+            }
+            if (n == 1) sb.AppendLine("未找到足够相似的结果（全部低于 40%，可能不在收录库中）");
+
+            // 低额度提示（仅配了 Key 的账号才有该字段）
+            var longRemaining = header?["long_remaining"];
+            if (longRemaining != null)
+            {
+                var remaining = JInt(header, "long_remaining");
+                if (remaining < 20) sb.AppendLine($"⚠️ SauceNAO 今日剩余额度：{remaining} 次");
+            }
+            return (sb.ToString().Trim(), best, null);
+        }
+        catch (Exception ex) { return ("", 0, $"结果解析异常: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// 格式化 trace.moe JSON 结果：多语言标题（中文>日文>罗马音>英文）+ 集数 + 时间点。
+    /// anilist 字段带 anilistInfo 参数时为对象，否则为数字，两者都兼容。
+    /// </summary>
+    static (string formatted, double best, string? error) FormatTraceMoeResults(string raw, int maxResults)
+    {
+        try
+        {
+            var node = JsonNode.Parse(raw);
+            var apiError = node?["error"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(apiError)) return ("", 0, $"返回错误: {apiError}");
+
+            // 匿名配额信息只记日志：quota/quotaUsed
+            var results = node?["result"]?.AsArray();
+            var sb = new StringBuilder();
+            sb.AppendLine("### 番剧场景识别（trace.moe）");
+
+            if (results == null || results.Count == 0)
+            {
+                sb.AppendLine("未找到匹配的番剧画面（图片可能不是动画截图，或为静止画/漫画）");
+                return (sb.ToString().Trim(), 0, null);
+            }
+
+            double best = 0;
+            int n = 1;
+            foreach (var r in results)
+            {
+                var similarity = JFloat(r, "similarity"); // 0~1
+                best = Math.Max(best, similarity);
+                if (similarity < TraceMoeMinSimilarity || n > maxResults) continue;
+
+                var anilist = r?["anilist"];
+                string title;
+                string? siteUrl = null;
+                var isAdult = false;
+                if (anilist is JsonObject info)
+                {
+                    title = TraceMoeTitle(info);
+                    siteUrl = info["siteUrl"]?.ToString();
+                    isAdult = string.Equals(info["isAdult"]?.ToString(), "true", StringComparison.OrdinalIgnoreCase);
+                    if (string.IsNullOrWhiteSpace(title)) title = $"AniList #{info["id"]}";
+                }
+                else title = $"AniList #{anilist}";
+
+                var episode = EpisodeToString(r?["episode"]);
+                var from = JFloat(r, "from");
+                var to = JFloat(r, "to");
+
+                sb.AppendLine($"#### {n}. {title}{(isAdult ? " 🔞" : "")}（相似度 {similarity * 100:F1}%）");
+                if (!string.IsNullOrWhiteSpace(episode)) sb.AppendLine($"集数: 第 {episode} 集");
+                if (from > 0 || to > 0) sb.AppendLine($"时间点: {FormatTimestamp(from)} ~ {FormatTimestamp(to)}");
+                if (!string.IsNullOrWhiteSpace(siteUrl)) sb.AppendLine($"详情: {siteUrl}");
+                var image = r?["image"]?.ToString();
+                if (!string.IsNullOrWhiteSpace(image)) sb.AppendLine($"画面预览: {image}");
+                sb.AppendLine();
+                n++;
+            }
+            if (n == 1) sb.AppendLine("未找到足够相似的番剧画面（全部低于 50%）");
+            return (sb.ToString().Trim(), best, null);
+        }
+        catch (Exception ex) { return ("", 0, $"结果解析异常: {ex.Message}"); }
+    }
+
+    /// <summary>trace.moe 标题：中文 &gt; 日文 &gt; 罗马音 &gt; 英文，取前两个不重复的组合展示。</summary>
+    static string TraceMoeTitle(JsonObject? info)
+    {
+        var t = info?["title"]?.AsObject();
+        var candidates = new[] { t?["chinese"], t?["native"], t?["romaji"], t?["english"] }
+            .Select(v => v?.ToString()).Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct().ToList();
+        if (candidates.Count == 0) return "";
+        return candidates.Count == 1 ? candidates[0] : $"{candidates[0]}（{candidates[1]}）";
+    }
+
+    /// <summary>episode 兼容解析：数字/字符串/数组（多集命中）统一转展示文本。</summary>
+    static string? EpisodeToString(JsonNode? episode)
+    {
+        if (episode == null) return null;
+        if (episode is JsonArray arr)
+        {
+            var parts = arr.Select(v => v?.ToString()).Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+            return parts.Count > 0 ? string.Join("、", parts) : null;
+        }
+        var s = episode.ToString();
+        return string.IsNullOrWhiteSpace(s) || s == "null" ? null : s;
+    }
+
+    /// <summary>秒数转 mm:ss（超1小时转 h:mm:ss）。</summary>
+    static string FormatTimestamp(double seconds)
+    {
+        if (seconds <= 0) return "00:00";
+        var t = TimeSpan.FromSeconds(seconds);
+        return t.Hours > 0
+            ? $"{(int)t.TotalHours:D2}:{t.Minutes:D2}:{t.Seconds:D2}"
+            : $"{t.Minutes:D2}:{t.Seconds:D2}";
+    }
+
+    /// <summary>SauceNAO 索引名缩短："Index #5: Pixiv Images" → "Pixiv Images"。</summary>
+    static string ShortIndexName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return "";
+        var idx = name.IndexOf(": ");
+        return idx >= 0 ? name[(idx + 2)..].Trim() : name;
+    }
+
+    /// <summary>
+    /// 搜源上传体积保障：超上限才降质压缩（搜源依赖画质，与识图的100KB激进压缩不同）；
+    /// GDI+ 解码不了的格式（如 WebP 动图）直接原样返回交给服务端处理。
+    /// </summary>
+    static byte[] EnsureUnderUploadLimit(byte[] bytes)
+    {
+        if (bytes.Length <= MaxUploadBytes) return bytes;
+
+        Log($"搜源: 图片 {bytes.Length / 1024 / 1024}MB 超限，压缩中");
+        try
+        {
+            using var ms = new MemoryStream(bytes);
+            using var img = Image.FromStream(ms);
+            int width = img.Width, height = img.Height;
+            while (true)
+            {
+                using var bmp = new Bitmap(width, height);
+                using var g = Graphics.FromImage(bmp);
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.DrawImage(img, 0, 0, width, height);
+                using var jpegMs = new MemoryStream();
+                var jpegParams = new EncoderParameters(1);
+                jpegParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 85L);
+                var jpegCodec = ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == ImageFormat.Jpeg.Guid);
+                bmp.Save(jpegMs, jpegCodec, jpegParams);
+                if (jpegMs.Length <= MaxUploadBytes)
+                { Log($"搜源: 压缩成功 {bytes.Length / 1024}KB -> {jpegMs.Length / 1024}KB"); return jpegMs.ToArray(); }
+
+                int nextWidth = Math.Max(100, width / 2);
+                int nextHeight = Math.Max(100, height / 2);
+                if (nextWidth == width && nextHeight == height)
+                { Log("搜源: 压缩到极限，按极限尺寸上传"); return jpegMs.ToArray(); }
+                width = nextWidth; height = nextHeight;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"搜源: 压缩失败（{ex.Message}），按原样上传");
+            return bytes;
+        }
+    }
+
+    /// <summary>取第一个非空字段；数组字段（creator/characters 等）自动拼接为顿号分隔。</summary>
+    static string? FirstNonEmpty(params JsonNode?[] nodes)
+    {
+        foreach (var nd in nodes)
+        {
+            if (nd == null) continue;
+            var s = nd is JsonArray arr
+                ? string.Join("、", arr.Where(v => v != null).Select(v => v!.ToString()))
+                : nd.ToString();
+            if (!string.IsNullOrWhiteSpace(s)) return s;
+        }
+        return null;
     }
 
     #endregion
@@ -1752,6 +2562,12 @@ public class SmartWebSearch(
 
     static List<string> GetBaiduKeys(SmartWebSearchConfig cfg) =>
         new() { cfg.BaiduApiKey1, cfg.BaiduApiKey2, cfg.BaiduApiKey3, cfg.BaiduApiKey4 };
+
+    static List<string> GetSauceKeys(SmartWebSearchConfig cfg) =>
+        new() { cfg.SauceNaoApiKey1, cfg.SauceNaoApiKey2 };
+
+    static List<string> GetTraceKeys(SmartWebSearchConfig cfg) =>
+        new() { cfg.TraceMoeApiKey1, cfg.TraceMoeApiKey2 };
 
     // ============ JSON 安全读取辅助 ============
 

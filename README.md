@@ -14,7 +14,13 @@
 - **双引擎搜索**：Tavily（英文强+AI摘要）+ 百度（中文强+图片视频），智能路由，免费50次/天
 - **百度热搜**：9个垂直分类热搜榜单（民生/财经/体育/娱乐/国际/挑战/电影/电视剧/小说），免费10次/天
 - **智能识图**：传入图片URL自动下载识别，超100KB自动压缩，免费100次/天
-- **多账号轮换**：每个引擎支持最多4组API Key，额度耗尽自动切换
+- **图片出处搜索（以图搜源，独立开关）**：
+  - **SearchSource**：一个工具三引擎——**SauceNAO**（插画/同人本/漫画/pixiv/danbooru/nhentai 综合库，反查**作品名、画师名**、原图链接；**免Key可用**，自动降级网页匿名模式）+ **Yandex**（相似网页搜源：游戏截图/照片/通用图，挖出包含此图的网页，免Key网页接口）+ **trace.moe**（番剧/动画截图专精，精确到作品名+集数+时间点，免Key即用）
+  - **auto = 交叉验证模式**：SauceNAO × Yandex 双引擎无条件并行，两边一致的作品/角色/画师/来源信息更可靠（输出自带交叉验证提示，AI 综合比对后下结论）；SauceNAO 低相似度时自动加入 trace.moe（番剧场景）
+  - AI 按图片类型显式选引擎：动画画面/问"什么番"→tracemoe，插画/本子→saucenao，游戏截图/通用图→yandex
+  - Yandex 无官方API走网页接口（.ru 域 + cookie 会话 + 浏览器请求头），内置 10 秒最小间隔限流防验证码，仅支持图片URL方式（data URI 自动跳过）
+  - 多语言标题（中文>日文>罗马音>英文）、成人内容标记、AniList 详情链接、画面预览
+- **多账号轮换**：每个引擎支持最多4组API Key（出处搜索引擎为2组），额度耗尽自动切换
 - **结果缓存**：相同查询在TTL内不重复调用API，节省额度
 
 ## 工具优先级
@@ -26,7 +32,8 @@
 2. **SmartChatSearch**（智能搜索生成）— SmartSummary失败时降级，功能最全面
 3. **Search**（普通搜索）— AI搜索均失败时最终降级，双引擎智能路由，AnySearch 免Key兜底
 4. **HotSearch**（百度热搜）— 用户想看热搜/今日热点时使用
-5. **ImageRecognition**（智能识图）— 用户引用图片问"这是什么"时使用
+5. **ImageRecognition**（智能识图）— 用户引用图片问"这是什么"（识别图里有什么）时使用
+6. **SearchSource**（图片出处搜索）— 用户发图问"出处/什么番/第几集/谁画的/求原图/找本子"（找图的来源）时使用，与识图区分
 
 ## 引擎对比（Search工具）
 
@@ -57,6 +64,9 @@
 - **百度千帆**：https://console.bce.baidu.com/qianfan/ais/console/apiKey 创建API Key
   - 无需实名、无需开启后付费，注册即可白嫖每日免费额度
   - ⚠️ 百度后付费最好别开，否则可能导致欠款
+- **SauceNAO**（图片出处搜索）：https://saucenao.com 免费注册，登录后在 `user.php?page=search-api` 页面获取 API Key
+  - 免Key自动走网页匿名模式（约4次/30秒、100次/天）；配 Key 走 JSON API 约 200 次/天，更稳定
+- **trace.moe**（番剧场景识别）：免Key匿名即可用（配额较低），Token 可提额
 
 ### 百度免费额度
 | 工具 | 每日免费额度 |
@@ -77,6 +87,9 @@
 | SummaryModel | 高性能版模型 | auto_thinking |
 | ChatSearchModel | 标准版模型 | deepseek-v3.2 |
 | EnableDeepSearch | 启用深度搜索（耗费较多额度）| false |
+| EnableSourceSearch | 图片出处搜索独立开关（关闭后 SearchSource 不注入）| true |
+| SauceNaoApiKey1/2 | SauceNAO API Key（可留空走网页匿名模式，配 Key 提额更稳）| 空 |
+| TraceMoeApiKey1/2 | trace.moe Token（可留空走匿名）| 空 |
 | EnableCache | 启用结果缓存 | true |
 | CacheTtlMinutes | 缓存过期时间 | 5分钟 |
 | ImplicitInjection | 隐式注入（函数文档按需加载，省token）| false |
@@ -154,6 +167,20 @@
 |------|------|------|
 | imageUrl | string | 图片URL地址（必填），插件自动下载+压缩 |
 
+### SearchSource（图片出处搜索）
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| imageUrl | string | 图片URL地址（必填），插件自动下载（超4MB才压缩，保留画质；Yandex 用原始 URL 由其服务器抓图）|
+| engine | string? | saucenao=插画/同人本/画师，tracemoe=番剧/动画截图，yandex=游戏截图/通用图，不传=交叉验证：SauceNAO×Yandex并行互证 + 低相似度补查trace.moe |
+| maxResults | int? | 每个引擎返回结果数，默认3，最多6 |
+
+输出内容：SauceNAO（标题/画师/所属作品/角色/原始来源/链接，pixiv 自动补作品与画师主页链接；**无Key自动降级网页匿名模式，画师/作品名照样能查**）+ trace.moe（多语言作品名/集数/时间点/AniList详情/画面预览）+ Yandex（包含此图的网页：标题/来源域名/描述/链接）。相似度低于40%的结果自动过滤。
+
+引擎说明：
+- **SauceNAO**：插画/同人本/本子/pixiv 作品反查（**画师名+作品名**+原图链接），免Key自动走网页匿名模式（配额低），配免费 API Key 提额更稳（约200次/天）
+- **trace.moe**：番剧/动画截图专精（动画帧定位作品+集数+时间点），免Key即用；**仅当图片是动画画面或用户明确问"什么番/动漫"时使用**，动漫截图以外的图（插画/CG/照片）不出结果
+- **Yandex**：相似网页搜源（哪些网页包含此图），游戏截图/照片/通用图唯一可行引擎，二次元图也能挖出收录页；网页接口免Key，内置限流（10秒/次）防验证码，被软拒绝时自动重置会话重试
+
 ## 文件结构
 
 ```
@@ -176,3 +203,4 @@ Alife.Plugin.SmartWebSearch/
 - **4.0.0** (2026-08-09)：适配 Alife 4.0.0 框架（ChatBehaviour + IInteractor）；新增隐式注入开关（函数文档按需加载，省token）；系统提示词瘦身；新增 manifest.json；修复多处健壮性问题（429重试循环、图片下载无大小限制、百度错误码解析异常、JSON字段类型不匹配导致整批结果丢失）
 - **4.2.0** (2026-08-10)：适配 Alife 4.2.0 框架（XmlHandler API 变更：Name 改为只读、构造函数需传 name，改用 `new XmlHandler("SmartWebSearch") { ... }` 初始化器写法）
 - **4.3.0** (2026-08-21)：新增 AnySearch 搜索家族：AnySearch（免Key匿名即可用，支持垂直领域 tag+params 精准搜索）+ AnySearchBatchSearch（并行批量搜1-5个查询）+ ExtractWebpage（网页正文转Markdown）+ GetSubDomains（垂直领域目录）；引擎模式新增 anysearch 并默认单独使用，auto 多渠道时 AnySearch 免Key兜底；UI 新增 AnySearch 配置区块
+- **4.4.0** (2026-08-22)：新增**图片出处搜索**（以图搜源，独立开关 EnableSourceSearch）：SearchSource 工具多引擎——SauceNAO（插画/同人本/本子反查画师名+作品名+原图链接，免Key自动走网页匿名模式，配免费API Key约200次/天更稳，2组轮换，pixiv 老链接规范化）+ Yandex（相似网页搜源：挖出包含此图的网页，游戏截图/照片/通用图唯一可行方案，.ru 域网页接口+cookie会话+浏览器请求头，内置10秒限流防验证码，软拒绝自动重置会话）+ trace.moe（番剧/动画截图定位作品名+集数+时间点，免Key，中>日>罗马音>英文多语言标题）；不传 engine = SauceNAO×Yandex 双引擎并行交叉验证（两边一致的作品/角色/画师/来源信息更可靠），番剧图（SauceNAO低相似度）自动补查 trace.moe；AI 按图片类型自动路由引擎（动画画面/问番→tracemoe，插画本子→saucenao，游戏截图/通用图→yandex），显式指定引擎严格执行；搜源专用图片下载通道（超4MB才压缩保留画质）；UI 新增出处搜索配置区块。（开发期曾引入后移除 IQDB 引擎：只返回图库链接、无画师/作品元数据）
