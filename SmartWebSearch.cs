@@ -95,6 +95,9 @@ public class SmartWebSearch(
 
     public SmartWebSearchConfig? Configuration { get; set; } = new();
 
+    // 注册到 XmlFunctionCaller 的函数集名称，同时是隐式注入的触发标签：<SmartWebSearch/>
+    const string HandlerName = "SmartWebSearch";
+
     static void Log(string msg) => Console.WriteLine($"[智能搜索] {msg}");
 
     #region 初始化与系统提示词
@@ -166,7 +169,7 @@ public class SmartWebSearch(
         };
 
         var implicitNote = cfg.ImplicitInjection
-            ? "\n- 需要搜索/热搜/识图时，先调用 <smartwebsearch/> 加载函数说明再按文档调用。"
+            ? $"\n- 需要搜索/热搜/识图时，先调用 <{HandlerName}/> 加载函数说明再按文档调用。"
             : "";
 
         RegisterFunctionHandlers(cfg, cfg.ImplicitInjection ? detailedRules : null);
@@ -181,7 +184,7 @@ public class SmartWebSearch(
     /// <summary>
     /// 4.0：DocumentMode 控制函数文档的注入方式。
     /// 显式（默认）：完整函数文档直接注入系统提示词，AI 开箱即用；
-    /// 隐式：只暴露触发标签 &lt;smartwebsearch/&gt;，AI 需先调用它按需加载文档（省 token，渐进式）。
+    /// 隐式：只暴露触发标签 &lt;SmartWebSearch/&gt;，AI 需先调用它按需加载文档（省 token，渐进式）。
     /// </summary>
     void RegisterFunctionHandlers(SmartWebSearchConfig cfg, string? explanation = null)
     {
@@ -194,17 +197,17 @@ public class SmartWebSearch(
         var documentMode = cfg.ImplicitInjection
             ? DocumentMode.Implicit
             : DocumentMode.Explicit;
-        var handler = new XmlHandler("SmartWebSearch")
+        var handler = new XmlHandler(HandlerName)
         {
             Description = HandlerDescriptionForEngine(cfg.Engine, cfg.EnableSourceSearch),
-            // 隐式模式：详细规则随 <smartwebsearch/> 加载的文档一并输出；显式模式保持 null 避免重复注入
+            // 隐式模式：详细规则随 <SmartWebSearch/> 加载的文档一并输出；显式模式保持 null 避免重复注入
             Explanation = explanation,
             Functions = exposed,
         };
         _registeredHandler = handler;
         Log($"引擎[{cfg.Engine}]：注入 {exposed.Count}/{discovered.Functions.Count} 个工具");
         if (cfg.ImplicitInjection)
-            Log("隐式注入已开启：AI 需先调用 <smartwebsearch/> 按需加载函数文档");
+            Log($"隐式注入已开启：AI 需先调用 <{HandlerName}/> 按需加载函数文档");
         functionService.RegisterHandler(handler, documentMode);
     }
 
@@ -225,9 +228,25 @@ public class SmartWebSearch(
             : "网络智能搜索：AnySearch + AI总结 + 双引擎搜索 + 热搜 + 识图。"
     };
 
+    // Search 方法的形参名：XmlHandler 反射 parameterInfo.Name 得到，须与形参拼写一致（比较时忽略大小写）
+    const string ParamQuery = "query";
+    const string ParamSearchDepth = "searchDepth";
+    const string ParamTopic = "topic";
+    const string ParamTimeRange = "timeRange";
+    const string ParamMaxResults = "maxResults";
+    const string ParamIncludeImages = "includeImages";
+    const string ParamIncludeVideos = "includeVideos";
+
+    /// <summary>
+    /// 名称比较统一忽略大小写：框架直接用 [XmlFunction] 方法名与形参名，不做大小写改写，
+    /// 这里不依赖任何大小写约定，框架侧怎么改都不会再失配。
+    /// </summary>
+    static bool IsNamed(string? actual, string expected) =>
+        string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>
     /// 单引擎模式下裁剪 Search 函数文档：只保留当前引擎相关参数并覆盖描述。
-    /// auto 模式保持全量。参数名与 XmlHandler 反射一致（方法参数名小写）。
+    /// auto 模式保持全量。参数名用 Param* 常量（与 Search 形参名一一对应）。
     /// </summary>
     static List<XmlFunction> TrimSearchForEngine(List<XmlFunction> functions, string engine)
     {
@@ -235,9 +254,9 @@ public class SmartWebSearch(
 
         string[] keep = engine switch
         {
-            "anysearch" => new[] { "query", "maxresults" },
-            "tavily" => new[] { "query", "searchdepth", "topic", "timerange", "maxresults" },
-            _ => new[] { "query", "searchdepth", "timerange", "maxresults", "includeimages", "includevideos" },
+            "anysearch" => new[] { ParamQuery, ParamMaxResults },
+            "tavily" => new[] { ParamQuery, ParamSearchDepth, ParamTopic, ParamTimeRange, ParamMaxResults },
+            _ => new[] { ParamQuery, ParamSearchDepth, ParamTimeRange, ParamMaxResults, ParamIncludeImages, ParamIncludeVideos },
         };
         string desc = engine switch
         {
@@ -248,7 +267,7 @@ public class SmartWebSearch(
 
         for (int i = 0; i < functions.Count; i++)
         {
-            if (functions[i].Name != "search") continue;
+            if (IsNamed(functions[i].Name, nameof(Search)) == false) continue;
             functions[i] = new XmlFunction
             {
                 Name = functions[i].Name,
@@ -259,8 +278,8 @@ public class SmartWebSearch(
                 ContentDescription = functions[i].ContentDescription,
                 // anysearch 模式下 maxResults 上限为 10，覆盖参数描述避免误导
                 Parameters = functions[i].Parameters
-                    .Where(p => keep.Contains(p.Name))
-                    .Select(p => engine == "anysearch" && p.Name == "maxresults"
+                    .Where(p => keep.Contains(p.Name, StringComparer.OrdinalIgnoreCase))
+                    .Select(p => engine == "anysearch" && IsNamed(p.Name, ParamMaxResults)
                         ? p with { Description = "结果数，默认5，最多10" }
                         : p)
                     .ToList(),
@@ -272,31 +291,31 @@ public class SmartWebSearch(
 
     /// <summary>
     /// 按引擎配置过滤工具：单独开启某引擎时，其他引擎的工具不注入文档也不注册调用，节省 token。
-    /// 函数名与 XmlHandler 反射一致（方法名小写）。
+    /// 函数名一律 nameof(方法名) 绑定（XmlHandler 用方法名当标签名，插件不擅自改名），比较忽略大小写。
     /// auto：全部注入；anysearch：AnySearch 家族 + Search；baidu：百度系 + Search；tavily：仅 Search。
     /// SearchSource（图片出处搜索）为独立功能，不依赖上述引擎，各模式下按独立开关注入。
     /// </summary>
     static List<XmlFunction> FilterFunctionsByEngine(List<XmlFunction> all, string engine, bool enableSourceSearch)
     {
         List<XmlFunction> Filter(params string[] names) =>
-            all.Where(f => names.Contains(f.Name)).ToList();
+            all.Where(f => names.Contains(f.Name, StringComparer.OrdinalIgnoreCase)).ToList();
 
         switch (engine)
         {
             case "anysearch":
                 return enableSourceSearch
-                    ? Filter("anysearch", "anysearchbatchsearch", "extractwebpage", "getsubdomains", "search", "searchsource")
-                    : Filter("anysearch", "anysearchbatchsearch", "extractwebpage", "getsubdomains", "search");
+                    ? Filter(nameof(AnySearch), nameof(AnySearchBatchSearch), nameof(ExtractWebpage), nameof(GetSubDomains), nameof(Search), nameof(SearchSource))
+                    : Filter(nameof(AnySearch), nameof(AnySearchBatchSearch), nameof(ExtractWebpage), nameof(GetSubDomains), nameof(Search));
             case "baidu":
                 return enableSourceSearch
-                    ? Filter("search", "smartsummary", "smartchatsearch", "hotsearch", "imagerecognition", "searchsource")
-                    : Filter("search", "smartsummary", "smartchatsearch", "hotsearch", "imagerecognition");
+                    ? Filter(nameof(Search), nameof(SmartSummary), nameof(SmartChatSearch), nameof(HotSearch), nameof(ImageRecognition), nameof(SearchSource))
+                    : Filter(nameof(Search), nameof(SmartSummary), nameof(SmartChatSearch), nameof(HotSearch), nameof(ImageRecognition));
             case "tavily":
                 return enableSourceSearch
-                    ? Filter("search", "searchsource")
-                    : Filter("search");
+                    ? Filter(nameof(Search), nameof(SearchSource))
+                    : Filter(nameof(Search));
             default: // auto：多渠道全注入
-                return enableSourceSearch ? all.ToList() : all.Where(f => f.Name != "searchsource").ToList();
+                return enableSourceSearch ? all.ToList() : all.Where(f => IsNamed(f.Name, nameof(SearchSource)) == false).ToList();
         }
     }
 
@@ -948,11 +967,21 @@ public class SmartWebSearch(
 
     #region 智能搜索生成（标准版）
 
+    // 标准版默认模型：百度自研、与搜索服务同源，最稳（DeepSeek 系列需账号在千帆开通，未开通会报 account_overdue）
+    const string DefaultChatSearchModel = "ernie-4.5-turbo-32k";
+
+    // 已停用的旧模型名 → 当前默认模型（百度已停用 deepseek-v3.2 / deepseek-r1 等旧模型，返回 invalid_model/account_overdue）
+    static readonly Dictionary<string, string> LegacyChatModels = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["deepseek-v3.2"] = DefaultChatSearchModel,
+        ["deepseek-r1"] = DefaultChatSearchModel,
+    };
+
     [XmlFunction(FunctionMode.OneShot)]
     [Description("智能搜索生成(标准)：功能最全的AI搜索，支持深度搜索/追问，适合复杂研究。")]
     public async Task SmartChatSearch(
         [Description("搜索关键词")] string query,
-        [Description("模型：deepseek-v3.2/deepseek-r1/ernie-4.5-turbo-32k等")] string? model = null,
+        [Description("模型：ernie-4.5-turbo-32k(默认，免开通最稳)/deepseek-v4-flash/deepseek-v4-pro(需在千帆开通)等")] string? model = null,
         [Description("深度搜索(更准但更慢更费额度)")] bool? deepSearch = null,
         [Description("时间范围：day/week/month/year")] string? timeRange = null,
         [Description("额外指令，引导回答方向")] string? instruction = null,
@@ -966,6 +995,12 @@ public class SmartWebSearch(
         { interactor.Poke("智能搜索生成需要百度千帆API Key"); return; }
 
         var useModel = string.IsNullOrWhiteSpace(model) ? cfg.ChatSearchModel : model;
+        // 旧模型名（旧默认值或用户手填）已停用：自动回退并提示，避免升级后一直查不到东西
+        if (LegacyChatModels.TryGetValue(useModel, out var fallbackModel))
+        {
+            Log($"模型 {useModel} 已停用，自动改用 {fallbackModel}（建议在插件设置中更新「智能搜索生成模型」）");
+            useModel = fallbackModel;
+        }
         var useDeepSearch = deepSearch ?? cfg.EnableDeepSearch;
         var results = Math.Clamp(maxResults ?? cfg.MaxResults, 1, 20);
         var cacheKey = $"chat:{query}:{useModel}:{useDeepSearch}:{timeRange}:{instruction}:{enableReasoning}:{results}";
@@ -2349,6 +2384,9 @@ public class SmartWebSearch(
                         continue;
                     }
 
+                    var retryBizError = BaiduBusinessErrorText(raw, label);
+                    if (retryBizError != null) { Log($"{label} 业务错误(重试): {retryBizError}"); return retryBizError; }
+
                     var retryResult = formatter(raw);
                     Log($"{label}[{idx + 1}]成功(重试)");
                     if (cacheKey != null) SaveCache(cfg, cacheKey, retryResult);
@@ -2367,6 +2405,23 @@ public class SmartWebSearch(
                     }
                     Log($"{label} 请求失败({(int)resp.StatusCode}): {errMsg}");
                     continue;
+                }
+
+                // HTTP 200 也可能是业务错误：百度部分接口（智能搜索生成等）出错时仍返回 200，
+                // 只在 body 里给 code/message（如 invalid_model / account_overdue），没有 choices/references。
+                // 不拦下来就会被格式化成"未返回有效内容"，用户只看到空结果、看不到真实原因。
+                var bizErrorText = BaiduBusinessErrorText(raw, label);
+                if (bizErrorText != null)
+                {
+                    var (bizCode, bizMsg) = JsonError(raw);
+                    if (bizCode == "216003" || IsBaiduQuotaError(raw))
+                    {
+                        Log($"{label} 账号{idx + 1}认证/额度异常(code={bizCode})，切换下一个");
+                        lock (_lock) _exhaustedBaidu.Add(idx);
+                        continue;
+                    }
+                    Log($"{label} 业务错误(code={bizCode}): {bizMsg}");
+                    return bizErrorText;
                 }
 
                 // 成功
@@ -2600,6 +2655,42 @@ public class SmartWebSearch(
         {
             return (null, raw.Length > 200 ? raw[..200] : raw);
         }
+    }
+
+    /// <summary>
+    /// 判定 HTTP 200 响应体是否为业务错误：百度部分接口（智能搜索生成/热搜等）出错也返回 200，
+    /// 只在 body 里带 code/message（如 invalid_model / account_overdue）。
+    /// 成功响应不含 code；为防误判，带正常数据字段（choices/references/data/result）时不视为错误。
+    /// </summary>
+    static bool IsBaiduBusinessError(string raw, string? code)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return false;
+        if (code is "0" or "success" or "Success" or "OK" or "ok") return false;
+
+        try
+        {
+            var node = JsonNode.Parse(raw);
+            if (node?["choices"] is not null || node?["references"] is not null
+                || node?["data"] is not null || node?["result"] is not null)
+                return false;
+        }
+        catch { }
+        return true;
+    }
+
+    /// <summary>业务错误时返回可直接给 AI/用户看的错误文本，正常响应返回 null。</summary>
+    static string? BaiduBusinessErrorText(string raw, string label)
+    {
+        var (code, message) = JsonError(raw);
+        if (IsBaiduBusinessError(raw, code) == false) return null;
+        // 常见错误补一句中文处理建议，避免只看到英文原文和"空结果"
+        var hint = code switch
+        {
+            "account_overdue" => "（该账号在百度模型服务上欠费/未开通所选模型：请到百度智能云控制台检查账户余额，或在插件设置里换用 ernie-4.5-turbo-32k）",
+            "invalid_model" => "（模型名不存在或未开通：请在插件设置里换用 ernie-4.5-turbo-32k）",
+            _ => ""
+        };
+        return $"{label}调用失败（code={code}）：{message}{hint}";
     }
 
     /// <summary>

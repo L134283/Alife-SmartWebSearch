@@ -584,7 +584,7 @@ public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSea
             AddInput(b, ref i, "高性能版模型", Configuration.SummaryModel, v => Configuration.SummaryModel = v);
             AddHint(b, ref i, "auto_thinking(自动思考，推荐) / thinking / non_thinking");
             AddInput(b, ref i, "智能搜索生成模型(标准版)", Configuration.ChatSearchModel, v => Configuration.ChatSearchModel = v);
-            AddHint(b, ref i, "deepseek-v3.2(推荐) / deepseek-r1 / ernie-4.5-turbo-32k 等");
+            AddHint(b, ref i, "ernie-4.5-turbo-32k(默认，百度自研免开通最稳) / deepseek-v4-flash / deepseek-v4-pro 等（DeepSeek 系列需账号在千帆开通对应模型，未开通会报 account_overdue；deepseek-v3.2、deepseek-r1 已停用，配置为旧名会自动回退到默认模型）");
             AddToggle(b, ref i, "启用深度搜索（智能搜索生成）", Configuration.EnableDeepSearch, v => Configuration.EnableDeepSearch = v);
             AddHint(b, ref i, "启用后智能搜索生成会更精准但更慢\n⚠️ 每次深度搜索会花费较多额度，请谨慎使用");
         });

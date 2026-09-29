@@ -85,7 +85,7 @@
 | MaxResults | 每次返回结果数量 | 5 |
 | SearchDepth | 搜索深度 basic/advanced | basic |
 | SummaryModel | 高性能版模型 | auto_thinking |
-| ChatSearchModel | 标准版模型 | deepseek-v3.2 |
+| ChatSearchModel | 标准版模型 | ernie-4.5-turbo-32k |
 | EnableDeepSearch | 启用深度搜索（耗费较多额度）| false |
 | EnableSourceSearch | 图片出处搜索独立开关（关闭后 SearchSource 不注入）| true |
 | SauceNaoApiKey1/2 | SauceNAO API Key（可留空走网页匿名模式，配 Key 提额更稳）| 空 |
@@ -137,7 +137,7 @@
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | query | string | 搜索关键词（必填）|
-| model | string? | deepseek-v3.2/deepseek-r1/ernie-4.5-turbo-32k等 |
+| model | string? | ernie-4.5-turbo-32k(默认，百度自研免开通最稳) / deepseek-v4-flash / deepseek-v4-pro 等（DeepSeek 系列需账号在千帆开通对应模型，未开通会报 account_overdue；deepseek-v3.2、deepseek-r1 已停用，填旧名会自动回退到默认模型） |
 | deepSearch | bool? | 启用深度搜索（更精准但更慢，耗费较多额度）|
 | timeRange | string? | day/week/month/year |
 | instruction | string? | 额外指令，引导AI回答方向 |
@@ -187,7 +187,7 @@
 Alife.Plugin.SmartWebSearch/
 ├── Alife.Plugin.SmartWebSearch.json   # 市场注册清单
 ├── manifest.json                      # 插件依赖清单
-├── SmartWebSearch.cs                  # 主模块（5个工具+智能路由+缓存+图片压缩）
+├── SmartWebSearch.cs                  # 主模块（10个工具+智能路由+缓存+图片压缩）
 ├── SmartWebSearchConfig.cs            # 配置类
 ├── SmartWebSearchUI_razor.g.cs        # UI界面
 ├── VERSION.txt                        # 版本号
@@ -203,4 +203,5 @@ Alife.Plugin.SmartWebSearch/
 - **4.0.0** (2026-08-09)：适配 Alife 4.0.0 框架（ChatBehaviour + IInteractor）；新增隐式注入开关（函数文档按需加载，省token）；系统提示词瘦身；新增 manifest.json；修复多处健壮性问题（429重试循环、图片下载无大小限制、百度错误码解析异常、JSON字段类型不匹配导致整批结果丢失）
 - **4.2.0** (2026-08-10)：适配 Alife 4.2.0 框架（XmlHandler API 变更：Name 改为只读、构造函数需传 name，改用 `new XmlHandler("SmartWebSearch") { ... }` 初始化器写法）
 - **4.3.0** (2026-08-21)：新增 AnySearch 搜索家族：AnySearch（免Key匿名即可用，支持垂直领域 tag+params 精准搜索）+ AnySearchBatchSearch（并行批量搜1-5个查询）+ ExtractWebpage（网页正文转Markdown）+ GetSubDomains（垂直领域目录）；引擎模式新增 anysearch 并默认单独使用，auto 多渠道时 AnySearch 免Key兜底；UI 新增 AnySearch 配置区块
+- **4.5.0** (2026-09-29)：修复官方「函数调用」插件改用方法原名后（不再把函数名/参数名小写化），本插件用全小写名单过滤导致**单引擎模式（anysearch/baidu/tavily）工具被全部过滤为空**、系统提示词里只剩文档标题、AI 调用一律报「环境中没有该标签」的问题；过滤与参数裁剪改用 `nameof(方法名)` + `StringComparer.OrdinalIgnoreCase`，参数保留列表改用与 `Search` 形参一致的常量，不再依赖框架的大小写约定（框架侧再改命名规则也不会失配）；handler 名与隐式触发标签提示统一用 `HandlerName` 常量；顺带修复 auto 模式关闭出处搜索时 `SearchSource` 仍残留注册的问题；修复**「智能搜索生成」一直返回空结果**：百度已停用 `deepseek-v3.2`/`deepseek-r1` 等旧模型、DeepSeek 系列在部分账号上还需单独开通（返回 `account_overdue`），而接口用 HTTP 200 + `code=invalid_model/account_overdue` 报错、被插件当成功吞成"未返回有效内容"；现标准版默认模型改为实测最稳的 `ernie-4.5-turbo-32k`（百度自研、与搜索服务同源、免开通），旧模型名自动回退并提示，且 200 响应体里的业务错误会带上中文处理建议原样返回给 AI/用户（不再伪装成空结果）
 - **4.4.0** (2026-08-22)：新增**图片出处搜索**（以图搜源，独立开关 EnableSourceSearch）：SearchSource 工具多引擎——SauceNAO（插画/同人本/本子反查画师名+作品名+原图链接，免Key自动走网页匿名模式，配免费API Key约200次/天更稳，2组轮换，pixiv 老链接规范化）+ Yandex（相似网页搜源：挖出包含此图的网页，游戏截图/照片/通用图唯一可行方案，.ru 域网页接口+cookie会话+浏览器请求头，内置10秒限流防验证码，软拒绝自动重置会话）+ trace.moe（番剧/动画截图定位作品名+集数+时间点，免Key，中>日>罗马音>英文多语言标题）；不传 engine = SauceNAO×Yandex 双引擎并行交叉验证（两边一致的作品/角色/画师/来源信息更可靠），番剧图（SauceNAO低相似度）自动补查 trace.moe；AI 按图片类型自动路由引擎（动画画面/问番→tracemoe，插画本子→saucenao，游戏截图/通用图→yandex），显式指定引擎严格执行；搜源专用图片下载通道（超4MB才压缩保留画质）；UI 新增出处搜索配置区块。（开发期曾引入后移除 IQDB 引擎：只返回图库链接、无画师/作品元数据）

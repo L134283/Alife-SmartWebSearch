@@ -43,9 +43,11 @@ public class SmartWebSearchConfig
     // 限时免费，搜索+大模型总结一步到位
     public string SummaryModel { get; set; } = "auto_thinking";
 
-    // 标准版智能搜索生成使用的模型：deepseek-v3.2 / deepseek-r1 / ernie-4.5-turbo-32k 等
+    // 标准版智能搜索生成使用的模型：ernie-4.5-turbo-32k（百度自研，默认，免开通最稳）
+    // 也可用 deepseek-v4-flash / deepseek-v4-pro（DeepSeek 系列需账号在千帆开通，未开通会报 account_overdue）
     // 功能最全面，支持可选深度搜索、知识注入、追问等
-    public string ChatSearchModel { get; set; } = "deepseek-v3.2";
+    // 注：deepseek-v3.2 / deepseek-r1 等旧模型已停用，配置为旧名时插件会自动回退到默认模型
+    public string ChatSearchModel { get; set; } = "ernie-4.5-turbo-32k";
 
     // 是否启用深度搜索（智能搜索生成专用，更精准但更慢，耗费较多额度）
     public bool EnableDeepSearch { get; set; } = false;
