@@ -23,12 +23,12 @@ namespace Alife.Plugin.SmartWebSearch;
 
 [Module(
     "网络智能搜索",
-    "多功能AI搜索插件：AnySearch(免Key) + AI总结搜索 + 智能搜索生成 + 双引擎搜索(Tavily+百度) + 百度热搜 + 智能识图 + 图片出处搜索(以图搜源：番剧场景/插画/同人本)，智能路由，多账号轮换，结果缓存。",
+    "多引擎网络搜索：AnySearch(免Key)、Tavily、百度、DeepSeek 可自由多选，智能路由；支持百度AI总结、热搜与识图，以及独立图片出处搜索，多账号轮换与结果缓存。",
     defaultCategory: "Doro的妙妙工具",
     EditorUI = typeof(SmartWebSearchUI))]
-public class SmartWebSearch(
+public partial class SmartWebSearch(
     XmlFunctionCaller functionService,
-    IInteractor<SmartWebSearch> interactor
+    Interactor<SmartWebSearch> interactor
 ) : ChatBehaviour, IConfigurable<SmartWebSearchConfig>
 {
     private static readonly HttpClient _http = new(new HttpClientHandler { UseProxy = false })
@@ -93,7 +93,7 @@ public class SmartWebSearch(
     private static readonly Dictionary<string, (string result, DateTime expiry)> _cache = new();
     private static readonly object _cacheLock = new();
 
-    public SmartWebSearchConfig? Configuration { get; set; } = new();
+    public SmartWebSearchConfig Configuration { get; set; } = null!;
 
     // 注册到 XmlFunctionCaller 的函数集名称，同时是隐式注入的触发标签：<SmartWebSearch/>
     const string HandlerName = "SmartWebSearch";
@@ -104,72 +104,59 @@ public class SmartWebSearch(
 
     XmlHandler? _registeredHandler;
 
-    protected override async Task OnAwake()
+    protected override Task OnAwake()
     {
-        var cfg = Configuration ?? new SmartWebSearchConfig();
-        var tCount = GetTavilyKeys(cfg).Count(k => !string.IsNullOrWhiteSpace(k));
-        var bCount = GetBaiduKeys(cfg).Count(k => !string.IsNullOrWhiteSpace(k));
+        if (_registeredHandler != null)
+            return Task.CompletedTask;
 
-        // 引擎描述：auto 模式附带路由说明，单引擎模式只描述当前引擎
-        var engineDesc = cfg.Engine switch
-        {
-            "tavily" => $"仅 Tavily（{tCount} 个账号）",
-            "baidu" => $"仅百度（{bCount} 个账号）",
-            "anysearch" => "仅 AnySearch",
-            _ => $"智能路由（Tavily {tCount} 个 + 百度 {bCount} 个 + AnySearch 兜底；中文→百度，英文→Tavily）"
-        };
-
-        // 工具级联：按引擎动态生成，单引擎模式不提及未注入的工具
-        var cascade = cfg.Engine switch
-        {
-            "anysearch" => "AnySearch（默认）→ Search（兜底）",
-            "baidu" => "SmartSummary → SmartChatSearch → Search",
-            "tavily" => "Search",
-            _ => "SmartSummary → SmartChatSearch → Search → AnySearch"
-        };
+        SmartWebSearchConfig cfg = Configuration;
+        IReadOnlyList<string> enabledEngines = cfg.GetEnabledEngines();
+        string engineDesc = enabledEngines.Count == 0
+            ? "网页搜索已关闭"
+            : string.Join("、", enabledEngines.Select(EngineDisplayName));
+        string searchRule = enabledEngines.Count == 0
+            ? "- 用户关闭了所有网页搜索引擎，不调用网页搜索、热搜或识图，也不要声称已经联网核实。"
+            : "- 用户要求搜索/知识可能过时/需最新信息或事实核查时，先搜索再回答。";
+        string cascade = cfg.IsEngineEnabled("baidu")
+            ? "需要综合答案时 SmartSummary → SmartChatSearch → Search；普通关键词或指定引擎时用 Search"
+            : enabledEngines.Count > 0 ? "普通网页搜索用 Search" : "没有可用的网页搜索工具";
 
         // 常时注入的硬规则：不依赖函数文档，AI 任何时候都需要（搜索时机、工具级联、引擎路由）。
         // 函数能力说明由 [Description] 自动注入，不再重复。
         var hardRules = $$"""
             ## 网络搜索
-            - 用户要求搜索/知识可能过时/需最新信息或事实核查时，先搜索再回答。
+            {{searchRule}}
             - 级联：{{cascade}}。
             - 引擎：{{engineDesc}}。
+            - 仅使用用户勾选的引擎；自动路由中文优先百度、其他语言优先 Tavily，之后尝试 DeepSeek、AnySearch，未勾选或未配置密钥的渠道跳过。
             """;
 
         // 图片出处搜索独立开关：关闭时不注入规则、不注册工具
         if (cfg.EnableSourceSearch)
         {
-            hardRules += """
-                - 图片搜源：插画/同人本/本子问"谁画的/什么作品"→SearchSource(engine=saucenao)；图片是动画画面或用户问"什么番/动漫第几集"→SearchSource(engine=tracemoe)；游戏截图/照片等通用图→SearchSource(engine=yandex)；不确定类型时不传 engine（SauceNAO×Yandex双引擎交叉验证）。不要用搜索工具查出处。
+            hardRules += "\n" + """
+                - 图片搜源：插画或漫画问"谁画的/什么作品"→SearchSource(engine=saucenao)；动画截图问"什么番/第几集"→SearchSource(engine=tracemoe)；游戏截图/照片等通用图→SearchSource(engine=yandex)；不确定类型时不传 engine（SauceNAO×Yandex双引擎交叉验证）。不要用网页搜索查图片出处。
                 """;
             Log("出处搜索已启用：SearchSource（SauceNAO × Yandex 交叉验证 + trace.moe）");
         }
 
         // 详细规则：与函数使用细节相关，按引擎动态精简，只提当前引擎能力。
         // 显式模式直接注入；隐式模式放进 handler.Explanation 随文档一并加载，省 token。
-        var detailedRules = cfg.Engine switch
-        {
-            "anysearch" => """
-                - 垂直搜先 GetSubDomains 查 tag+params；AnySearchBatchSearch 批量1-5查询；ExtractWebpage 网页正文提取。
-                """,
-            "baidu" => """
-                - 百度中文强+可带图/视频(Search: includeImages/includeVideos)；SmartSummary 高性能一步到位，SmartChatSearch 支持深度搜索/追问。
-                - 深度 advanced/deep_search 更准但更慢更费额度，非必要不主动加深。
-                """,
-            "tavily" => """
-                - Tavily 自带 AI 摘要、英文结果强。
-                - 深度 advanced 更准但更慢更费额度，非必要不主动加深。
-                """,
-            _ => """
-                - 百度中文强+可带图/视频(Search: includeImages/includeVideos)；Tavily 有AI摘要、英文强；可传 engine 强制指定。
-                - AnySearch 免Key：多渠道兜底；垂直搜先 GetSubDomains 查 tag+params；AnySearchBatchSearch 批量1-5查询；ExtractWebpage 正文转Markdown。
-                - 深度 advanced/deep_search 更准但更慢更费额度，非必要不主动加深。
-                """,
-        };
+        List<string> rules = new();
+        if (cfg.IsEngineEnabled("anysearch"))
+            rules.Add("- AnySearch 可免Key使用；垂直搜先 GetSubDomains 查 tag+params，批量1-5查询用 AnySearchBatchSearch，网页正文提取用 ExtractWebpage。");
+        if (cfg.IsEngineEnabled("baidu"))
+            rules.Add("- 百度中文强，可带图片/视频；SmartSummary 搜索并总结，SmartChatSearch 支持深度搜索及追问。");
+        if (cfg.IsEngineEnabled("tavily"))
+            rules.Add("- Tavily 自带 AI 摘要，英文结果强。");
+        if (cfg.IsEngineEnabled("deepseek"))
+            rules.Add("- DeepSeek 是独立的付费网页搜索，不是聊天接口；DeepSeekSearch 支持 site:、-site:、精确短语、lang:、after:、before:，关键词限128字符，需要长正文时再启用 includeContent。");
+        if (cfg.IsEngineEnabled("tavily") || cfg.IsEngineEnabled("baidu"))
+            rules.Add("- advanced/deep_search 更准但更慢更费额度，非必要不主动加深。");
+        string detailedRules = string.Join("\n", rules);
 
-        var implicitNote = cfg.ImplicitInjection
-            ? $"\n- 需要搜索/热搜/识图时，先调用 <{HandlerName}/> 加载函数说明再按文档调用。"
+        var implicitNote = cfg.ImplicitInjection && (enabledEngines.Count > 0 || cfg.EnableSourceSearch)
+            ? $"\n- 需要使用本插件功能时，先调用 <{HandlerName}/> 加载函数说明再按文档调用。"
             : "";
 
         RegisterFunctionHandlers(cfg, cfg.ImplicitInjection ? detailedRules : null);
@@ -179,6 +166,7 @@ public class SmartWebSearch(
             interactor.Prompt((hardRules + implicitNote).Trim());
         else
             interactor.Prompt($"{hardRules.Trim()}\n\n{detailedRules.Trim()}{implicitNote}");
+        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -190,43 +178,43 @@ public class SmartWebSearch(
     {
         var discovered = new XmlHandler(this);
         // 按引擎配置过滤：单独开启某引擎时，其他引擎的工具不注入文档也不注册调用，节省 token
-        var exposed = FilterFunctionsByEngine(discovered.Functions, cfg.Engine, cfg.EnableSourceSearch);
+        var exposed = FilterFunctionsByEngine(discovered.Functions, cfg);
         // 单引擎模式下裁剪 Search 函数文档：只保留当前引擎相关参数，避免向 AI 暴露不可用的引擎路由/专属参数
-        exposed = TrimSearchForEngine(exposed, cfg.Engine);
+        exposed = TrimSearchForEngines(exposed, cfg.GetEnabledEngines());
 
         var documentMode = cfg.ImplicitInjection
             ? DocumentMode.Implicit
             : DocumentMode.Explicit;
         var handler = new XmlHandler(HandlerName)
         {
-            Description = HandlerDescriptionForEngine(cfg.Engine, cfg.EnableSourceSearch),
+            Description = HandlerDescription(cfg),
             // 隐式模式：详细规则随 <SmartWebSearch/> 加载的文档一并输出；显式模式保持 null 避免重复注入
             Explanation = explanation,
             Functions = exposed,
         };
-        _registeredHandler = handler;
-        Log($"引擎[{cfg.Engine}]：注入 {exposed.Count}/{discovered.Functions.Count} 个工具");
+        Log($"引擎[{string.Join(",", cfg.GetEnabledEngines())}]：注入 {exposed.Count}/{discovered.Functions.Count} 个工具");
         if (cfg.ImplicitInjection)
             Log($"隐式注入已开启：AI 需先调用 <{HandlerName}/> 按需加载函数文档");
-        functionService.RegisterHandler(handler, documentMode);
+        functionService.RegisterHandler(handler, documentMode, cancellationToken: DestroyCancellationToken);
+        _registeredHandler = handler;
     }
 
-    /// <summary>按引擎生成 handler 描述：单引擎模式不提及未注入的工具，避免误导。</summary>
-    static string HandlerDescriptionForEngine(string engine, bool enableSourceSearch = true) => engine switch
+    static string EngineDisplayName(string engine) => engine switch
     {
-        "anysearch" => enableSourceSearch
-            ? "网络智能搜索：AnySearch 通用/垂直搜索、批量搜索、网页提取、垂直目录、图片出处搜索。"
-            : "网络智能搜索：AnySearch 通用/垂直搜索、批量搜索、网页提取、垂直目录。",
-        "baidu" => enableSourceSearch
-            ? "网络智能搜索：百度 AI总结 + 智能搜索 + 双引擎搜索 + 热搜 + 识图 + 图片出处搜索。"
-            : "网络智能搜索：百度 AI总结 + 智能搜索 + 双引擎搜索 + 热搜 + 识图。",
-        "tavily" => enableSourceSearch
-            ? "网络智能搜索：Tavily 搜索 + 图片出处搜索。"
-            : "网络智能搜索：Tavily 搜索。",
-        _ => enableSourceSearch
-            ? "网络智能搜索：AnySearch + AI总结 + 双引擎搜索 + 热搜 + 识图 + 图片出处搜索。"
-            : "网络智能搜索：AnySearch + AI总结 + 双引擎搜索 + 热搜 + 识图。"
+        "anysearch" => "AnySearch",
+        "tavily" => "Tavily",
+        "baidu" => "百度",
+        "deepseek" => "DeepSeek",
+        _ => engine,
     };
+
+    static string HandlerDescription(SmartWebSearchConfig cfg)
+    {
+        List<string> capabilities = cfg.GetEnabledEngines().Select(EngineDisplayName).ToList();
+        if (cfg.EnableSourceSearch)
+            capabilities.Add("图片出处搜索");
+        return capabilities.Count == 0 ? "网络搜索已关闭。" : $"网络智能搜索：{string.Join("、", capabilities)}。";
+    }
 
     // Search 方法的形参名：XmlHandler 反射 parameterInfo.Name 得到，须与形参拼写一致（比较时忽略大小写）
     const string ParamQuery = "query";
@@ -236,6 +224,7 @@ public class SmartWebSearch(
     const string ParamMaxResults = "maxResults";
     const string ParamIncludeImages = "includeImages";
     const string ParamIncludeVideos = "includeVideos";
+    const string ParamEngine = "engine";
 
     /// <summary>
     /// 名称比较统一忽略大小写：框架直接用 [XmlFunction] 方法名与形参名，不做大小写改写，
@@ -245,25 +234,26 @@ public class SmartWebSearch(
         string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// 单引擎模式下裁剪 Search 函数文档：只保留当前引擎相关参数并覆盖描述。
-    /// auto 模式保持全量。参数名用 Param* 常量（与 Search 形参名一一对应）。
+    /// 只暴露已勾选引擎支持的参数，避免模型调用被禁用的渠道。
     /// </summary>
-    static List<XmlFunction> TrimSearchForEngine(List<XmlFunction> functions, string engine)
+    static List<XmlFunction> TrimSearchForEngines(List<XmlFunction> functions, IReadOnlyList<string> engines)
     {
-        if (engine == "auto") return functions;
-
-        string[] keep = engine switch
+        HashSet<string> keep = new(StringComparer.OrdinalIgnoreCase) { ParamQuery, ParamMaxResults };
+        if (engines.Count > 1)
+            keep.Add(ParamEngine);
+        if (engines.Contains("tavily") || engines.Contains("baidu"))
         {
-            "anysearch" => new[] { ParamQuery, ParamMaxResults },
-            "tavily" => new[] { ParamQuery, ParamSearchDepth, ParamTopic, ParamTimeRange, ParamMaxResults },
-            _ => new[] { ParamQuery, ParamSearchDepth, ParamTimeRange, ParamMaxResults, ParamIncludeImages, ParamIncludeVideos },
-        };
-        string desc = engine switch
+            keep.Add(ParamSearchDepth);
+            keep.Add(ParamTimeRange);
+        }
+        if (engines.Contains("tavily"))
+            keep.Add(ParamTopic);
+        if (engines.Contains("baidu"))
         {
-            "anysearch" => "搜索互联网获取实时信息（走 AnySearch）。用户要求搜索或知识可能过时/需事实核查时主动调用。",
-            "tavily" => "搜索互联网获取实时信息（Tavily）。用户要求搜索或知识可能过时/需事实核查时主动调用。",
-            _ => "搜索互联网获取实时信息（百度）。用户要求搜索或知识可能过时/需事实核查时主动调用。",
-        };
+            keep.Add(ParamIncludeImages);
+            keep.Add(ParamIncludeVideos);
+        }
+        string desc = $"搜索互联网获取实时信息（{string.Join("、", engines.Select(EngineDisplayName))}），仅使用已勾选引擎。用户要求搜索或需最新信息、事实核查时主动调用。";
 
         for (int i = 0; i < functions.Count; i++)
         {
@@ -278,9 +268,11 @@ public class SmartWebSearch(
                 ContentDescription = functions[i].ContentDescription,
                 // anysearch 模式下 maxResults 上限为 10，覆盖参数描述避免误导
                 Parameters = functions[i].Parameters
-                    .Where(p => keep.Contains(p.Name, StringComparer.OrdinalIgnoreCase))
-                    .Select(p => engine == "anysearch" && IsNamed(p.Name, ParamMaxResults)
+                    .Where(p => keep.Contains(p.Name))
+                    .Select(p => engines.Count == 1 && engines[0] == "anysearch" && IsNamed(p.Name, ParamMaxResults)
                         ? p with { Description = "结果数，默认5，最多10" }
+                        : IsNamed(p.Name, ParamEngine)
+                            ? p with { Description = $"指定已勾选引擎：{string.Join("/", engines)}；不传则智能路由" }
                         : p)
                     .ToList(),
                 Invoker = functions[i].Invoker,
@@ -292,31 +284,23 @@ public class SmartWebSearch(
     /// <summary>
     /// 按引擎配置过滤工具：单独开启某引擎时，其他引擎的工具不注入文档也不注册调用，节省 token。
     /// 函数名一律 nameof(方法名) 绑定（XmlHandler 用方法名当标签名，插件不擅自改名），比较忽略大小写。
-    /// auto：全部注入；anysearch：AnySearch 家族 + Search；baidu：百度系 + Search；tavily：仅 Search。
+    /// 按勾选组合取各引擎工具的并集；Tavily 仅使用 Search，DeepSeek 另有专用工具。
     /// SearchSource（图片出处搜索）为独立功能，不依赖上述引擎，各模式下按独立开关注入。
     /// </summary>
-    static List<XmlFunction> FilterFunctionsByEngine(List<XmlFunction> all, string engine, bool enableSourceSearch)
+    static List<XmlFunction> FilterFunctionsByEngine(List<XmlFunction> all, SmartWebSearchConfig cfg)
     {
-        List<XmlFunction> Filter(params string[] names) =>
-            all.Where(f => names.Contains(f.Name, StringComparer.OrdinalIgnoreCase)).ToList();
-
-        switch (engine)
-        {
-            case "anysearch":
-                return enableSourceSearch
-                    ? Filter(nameof(AnySearch), nameof(AnySearchBatchSearch), nameof(ExtractWebpage), nameof(GetSubDomains), nameof(Search), nameof(SearchSource))
-                    : Filter(nameof(AnySearch), nameof(AnySearchBatchSearch), nameof(ExtractWebpage), nameof(GetSubDomains), nameof(Search));
-            case "baidu":
-                return enableSourceSearch
-                    ? Filter(nameof(Search), nameof(SmartSummary), nameof(SmartChatSearch), nameof(HotSearch), nameof(ImageRecognition), nameof(SearchSource))
-                    : Filter(nameof(Search), nameof(SmartSummary), nameof(SmartChatSearch), nameof(HotSearch), nameof(ImageRecognition));
-            case "tavily":
-                return enableSourceSearch
-                    ? Filter(nameof(Search), nameof(SearchSource))
-                    : Filter(nameof(Search));
-            default: // auto：多渠道全注入
-                return enableSourceSearch ? all.ToList() : all.Where(f => IsNamed(f.Name, nameof(SearchSource)) == false).ToList();
-        }
+        HashSet<string> names = new(StringComparer.OrdinalIgnoreCase);
+        if (cfg.GetEnabledEngines().Count > 0)
+            names.Add(nameof(Search));
+        if (cfg.IsEngineEnabled("anysearch"))
+            names.UnionWith(new[] { nameof(AnySearch), nameof(AnySearchBatchSearch), nameof(ExtractWebpage), nameof(GetSubDomains) });
+        if (cfg.IsEngineEnabled("baidu"))
+            names.UnionWith(new[] { nameof(SmartSummary), nameof(SmartChatSearch), nameof(HotSearch), nameof(ImageRecognition) });
+        if (cfg.IsEngineEnabled("deepseek"))
+            names.Add(nameof(DeepSeekSearch));
+        if (cfg.EnableSourceSearch)
+            names.Add(nameof(SearchSource));
+        return all.Where(f => names.Contains(f.Name)).ToList();
     }
 
     /// <summary>热重载/活动销毁时注销本模块注册的 XmlHandler，避免旧 handler 残留在函数表中。</summary>
@@ -335,57 +319,58 @@ public class SmartWebSearch(
     #region 主搜索入口
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("搜索互联网获取实时信息，支持 Tavily/百度/AnySearch 智能路由。用户要求搜索或知识可能过时/需事实核查时主动调用。")]
+    [Description("搜索互联网获取实时信息，支持 Tavily/百度/DeepSeek/AnySearch 智能路由，仅使用已勾选的引擎。用户要求搜索或知识可能过时/需事实核查时主动调用。")]
     public async Task Search(
         [Description("搜索关键词")] string query,
-        [Description("引擎：tavily/baidu/anysearch，不传则智能路由")] string? engine = null,
+        [Description("指定已勾选引擎：tavily/baidu/deepseek/anysearch，不传则智能路由")] string? engine = null,
         [Description("深度：basic/advanced")] string? searchDepth = null,
         [Description("主题(仅Tavily)：general/news/finance")] string? topic = null,
-        [Description("时间范围：day/week/month/year")] string? timeRange = null,
+        [Description("时间范围(仅Tavily/百度)：day/week/month/year；DeepSeek 可在关键词中使用 after:/before:")] string? timeRange = null,
         [Description("结果数，默认5，最多20")] int? maxResults = null,
         [Description("含图片(仅百度)")] bool? includeImages = null,
         [Description("含视频(仅百度)")] bool? includeVideos = null)
     {
         if (string.IsNullOrWhiteSpace(query)) { interactor.Poke("搜索关键词不能为空"); return; }
 
-        var cfg = Configuration ?? new SmartWebSearchConfig();
-        var tavilyKeys = GetTavilyKeys(cfg);
-        var baiduKeys = GetBaiduKeys(cfg);
-        var hasTavily = tavilyKeys.Any(k => !string.IsNullOrWhiteSpace(k));
-        var hasBaidu = baiduKeys.Any(k => !string.IsNullOrWhiteSpace(k));
+        SmartWebSearchConfig cfg = Configuration;
+        IReadOnlyList<string> enabledEngines = cfg.GetEnabledEngines();
+        if (enabledEngines.Count == 0)
+        { interactor.Poke("网页搜索已关闭，请先在插件设置中勾选至少一个引擎"); return; }
 
-        // AnySearch 免Key匿名可用，始终可作兜底；仅当用户明确指定且未配置 Tavily/百度 Key 时才提示
-        if (!hasTavily && !hasBaidu && cfg.Engine is "tavily" or "baidu")
-        { interactor.Poke("未配置任何搜索引擎的 API Key，请在插件设置中填写"); return; }
+        string? requestedEngine = string.IsNullOrWhiteSpace(engine) ? null : engine.Trim().ToLowerInvariant();
+        if (requestedEngine == "auto")
+            requestedEngine = null;
+        if (requestedEngine != null && enabledEngines.Contains(requestedEngine) == false)
+        {
+            interactor.Poke($"引擎「{requestedEngine}」未勾选或不受支持；当前已勾选：{string.Join("、", enabledEngines.Select(EngineDisplayName))}");
+            return;
+        }
+        if (requestedEngine != null && IsEngineReady(requestedEngine, cfg) == false)
+        { interactor.Poke($"{EngineDisplayName(requestedEngine)} 已勾选，但未配置 API Key，请在插件设置中填写"); return; }
 
         var depth = string.IsNullOrWhiteSpace(searchDepth) ? cfg.SearchDepth : searchDepth;
         var results = Math.Clamp(maxResults ?? cfg.MaxResults, 1, 20);
 
-        var cacheKey = $"search:{engine?.Trim().ToLower()}:{query}:{depth}:{results}:{topic}:{timeRange}:{includeImages}:{includeVideos}";
-        if (TryGetCached(cfg, cacheKey, out var cachedResult))
-        {
-            Log($"缓存命中: {query[..Math.Min(30, query.Length)]}...");
-            interactor.Poke(cachedResult);
-            return;
-        }
-
-        // 账号耗尽状态在各调用骨架内部清空（每次调用仅影响当次轮换），无需在此重复清理
-        var searchOrder = ResolveSearchOrder(engine, cfg.Engine, query, hasTavily, hasBaidu);
+        List<string> searchOrder = ResolveSearchOrder(requestedEngine, cfg, query);
+        if (searchOrder.Count == 0)
+        { interactor.Poke("已勾选的搜索引擎尚未配置 API Key，请填写密钥，或勾选可免Key使用的 AnySearch"); return; }
 
         string? result = null;
-        foreach (var eng in searchOrder)
+        foreach (string eng in searchOrder)
         {
-            if (eng == "tavily" && hasTavily)
-                result = await TryTavilySearch(query, depth, topic, timeRange, results, cacheKey, cfg);
-            else if (eng == "baidu" && hasBaidu)
-                result = await TryBaiduSearch(query, depth, timeRange, results, includeImages, includeVideos, cacheKey, cfg);
-            else if (eng == "anysearch")
-                result = await TryAnySearch(query, results, cfg);
+            result = eng switch
+            {
+                "tavily" => await TryTavilySearch(query, depth, topic, timeRange, results, cfg),
+                "baidu" => await TryBaiduSearch(query, depth, timeRange, results, includeImages, includeVideos, cfg),
+                "deepseek" => await TryDeepSeekSearch(query, results, cfg),
+                "anysearch" => await TryAnySearch(query, results, cfg),
+                _ => null,
+            };
 
             if (result != null) break;
         }
 
-        if (result == null) { interactor.Poke("所有搜索引擎均不可用，请检查 API Key 配置或等待额度刷新"); return; }
+        if (result == null) { interactor.Poke("本次尝试的已勾选引擎均未返回可用结果，请检查密钥、网络或额度后重试"); return; }
 
         interactor.Poke(result);
     }
@@ -408,18 +393,21 @@ public class SmartWebSearch(
 
         var cfg = Configuration ?? new SmartWebSearchConfig();
         var results = Math.Clamp(maxResults ?? cfg.MaxResults, 1, 10);
+        if (cfg.IsEngineEnabled("anysearch") == false)
+        { interactor.Poke("AnySearch 未启用，请先在插件设置中勾选该引擎"); return; }
+        if (string.IsNullOrWhiteSpace(paramsStr) == false && string.IsNullOrWhiteSpace(tag))
+        { interactor.Poke("提供垂直参数时还需指定 tag；请先用 GetSubDomains 查询标签及参数"); return; }
 
         // 语言/区域路由：与 Search 工具的中文判定保持一致
         var isChinese = IsChineseQuery(query);
         var useZone = string.IsNullOrWhiteSpace(zone) ? (isChinese ? "cn" : "intl") : zone;
         var useLang = string.IsNullOrWhiteSpace(language) ? (isChinese ? "zh-CN" : "en") : language;
-        var hasKey = !string.IsNullOrWhiteSpace(cfg.AnySearchApiKey);
-
-        var cacheKey = $"anysearch:{query}:{tag}:{paramsStr}:{useZone}:{useLang}:{results}:{hasKey}";
+        string cacheKey = BuildAnySearchCacheKey("search", cfg.AnySearchApiKey,
+            query, tag, paramsStr, useZone, useLang, results.ToString(CultureInfo.InvariantCulture));
 
         var result = await AnySearchCallAsync(query, tag, paramsStr, useZone, useLang, results, cacheKey, cfg);
 
-        interactor.Poke(result ?? "AnySearch搜索失败，所有渠道均不可用。可尝试使用智能路由搜索(Search)");
+        interactor.Poke(result ?? "AnySearch 暂未返回可用结果。可使用 Search 尝试其他已勾选的引擎");
     }
 
     /// <summary>
@@ -432,8 +420,8 @@ public class SmartWebSearch(
         var isChinese = IsChineseQuery(query);
         var zone = isChinese ? "cn" : "intl";
         var language = isChinese ? "zh-CN" : "en";
-        var hasKey = !string.IsNullOrWhiteSpace(cfg.AnySearchApiKey);
-        var cacheKey = $"anysearch:{query}:::{zone}:{language}:{results}:{hasKey}";
+        string cacheKey = BuildAnySearchCacheKey("search", cfg.AnySearchApiKey,
+            query, null, null, zone, language, results.ToString(CultureInfo.InvariantCulture));
         return await AnySearchCallAsync(query, null, null, zone, language, results, cacheKey, cfg);
     }
 
@@ -463,6 +451,8 @@ public class SmartWebSearch(
             {
                 body["tag"] = tag;
                 var parsedParams = TryParseAnySearchParams(paramsStr);
+                if (string.IsNullOrWhiteSpace(paramsStr) == false && parsedParams == null)
+                { Log("AnySearch 垂直参数无效，未发送搜索请求"); return null; }
                 if (parsedParams != null) body["params"] = parsedParams;
             }
 
@@ -471,22 +461,25 @@ public class SmartWebSearch(
             HttpRequestMessage MakeRequest() => BuildAnySearchRequest(HttpMethod.Post, AnySearchUrl, body.ToJsonString(), key);
 
             Log($"AnySearch [{zone}/{language}]");
-            using var resp = await _http.SendAsync(MakeRequest());
-            var raw = await resp.Content.ReadAsStringAsync();
+            using HttpRequestMessage request = MakeRequest();
+            using var resp = await _http.SendAsync(request, DestroyCancellationToken);
+            var raw = await resp.Content.ReadAsStringAsync(DestroyCancellationToken);
 
             // 频率限制：等待2秒后重试一次
             if ((int)resp.StatusCode == 429)
             {
                 Log("AnySearch 频率限制，等待2秒重试");
-                await Task.Delay(2000);
-                using var resp2 = await _http.SendAsync(MakeRequest());
-                raw = await resp2.Content.ReadAsStringAsync();
+                await Task.Delay(2000, DestroyCancellationToken);
+                using HttpRequestMessage retryRequest = MakeRequest();
+                using var resp2 = await _http.SendAsync(retryRequest, DestroyCancellationToken);
+                raw = await resp2.Content.ReadAsStringAsync(DestroyCancellationToken);
                 if (!resp2.IsSuccessStatusCode)
                 {
                     Log($"AnySearch 重试失败 (HTTP {(int)resp2.StatusCode})");
                     return null;
                 }
-                var retryResult = FormatAnySearchResults(raw);
+                var retryResult = FormatAnySearchResults(raw, query);
+                if (retryResult == null) return null;
                 Log("AnySearch 搜索成功（重试）");
                 if (cacheKey != null) SaveCache(cfg, cacheKey, retryResult);
                 return retryResult;
@@ -498,13 +491,15 @@ public class SmartWebSearch(
                 return null;
             }
 
-            var formatted = FormatAnySearchResults(raw);
+            var formatted = FormatAnySearchResults(raw, query);
+            if (formatted == null) return null;
             Log("AnySearch 搜索成功");
             if (cacheKey != null) SaveCache(cfg, cacheKey, formatted);
             return formatted;
         }
+        catch (OperationCanceledException) when (DestroyCancellationToken.IsCancellationRequested) { throw; }
         catch (TaskCanceledException) { Log("AnySearch 超时"); return null; }
-        catch (Exception ex) { Log($"AnySearch 异常: {ex.Message}"); return null; }
+        catch (Exception ex) { Log($"AnySearch 请求异常（{ex.GetType().Name}）"); return null; }
     }
 
     /// <summary>
@@ -516,7 +511,7 @@ public class SmartWebSearch(
         var req = new HttpRequestMessage(method, url);
         req.Headers.TryAddWithoutValidation("X-Anysearch-Client", "skill/3.0.1");
         if (!string.IsNullOrWhiteSpace(apiKey))
-            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey.Trim());
         if (bodyJson != null)
             req.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
         return req;
@@ -530,61 +525,76 @@ public class SmartWebSearch(
         if (string.IsNullOrWhiteSpace(paramsStr)) return null;
         try
         {
-            if (JsonNode.Parse(paramsStr) is JsonObject obj) return obj;
+            return JsonNode.Parse(paramsStr) as JsonObject;
         }
-        catch { /* 非 JSON，走 key=value 回退 */ }
+        catch (JsonException) { /* 非 JSON，走 key=value 回退 */ }
 
         var result = new JsonObject();
         foreach (var part in paramsStr.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             var idx = part.IndexOf('=');
-            if (idx <= 0) continue;
+            if (idx <= 0) return null;
             var k = part[..idx].Trim();
             var v = part[(idx + 1)..].Trim();
-            if (k.Length > 0) result[k] = v;
+            if (k.Length == 0 || v.Length == 0) return null;
+            result[k] = v;
         }
         return result.Count > 0 ? result : null;
     }
 
-    static string FormatAnySearchResults(string rawJson)
+    static string BuildAnySearchCacheKey(string operation, string apiKey, params string?[] fields)
+    {
+        string authentication = string.IsNullOrWhiteSpace(apiKey) ? "anonymous"
+            : Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(apiKey.Trim())));
+        // JSON 编码避免 query/tag 中的冒号混淆；版本前缀隔离旧版缓存的错误字符串。
+        return $"anysearch-v3:{operation}:{authentication}:{JsonSerializer.Serialize(fields)}";
+    }
+
+    static string? FormatAnySearchResults(string rawJson, string query)
     {
         try
         {
             var node = JsonNode.Parse(rawJson);
             var sb = new StringBuilder();
 
-            // 业务错误码（HTTP 200 但 code != 0）
+            // 只有明确的成功码才接受，拒绝 HTTP 200 的错误与畸形响应。
             var code = node?["code"]?.ToString();
-            if (code != null && code != "0")
+            if (node is not JsonObject || code != "0")
             {
-                var msg = node?["message"]?.ToString() ?? "";
-                sb.AppendLine($"AnySearch 请求失败: {(string.IsNullOrWhiteSpace(msg) ? "未知错误" : msg)}");
-                return sb.ToString().Trim();
+                Log($"AnySearch 业务请求失败（{ExtractAnySearchError(rawJson)}）");
+                return null;
             }
 
             var data = node?["data"];
-            var results = data?["results"]?.AsArray();
+            if (data?["results"] is not JsonArray results)
+            { Log("AnySearch 响应缺少有效 results 数组"); return null; }
             var total = JLong(data?["metadata"], "total_results", -1);
 
-            if (results == null || results.Count == 0)
+            if (results.Count == 0)
             {
-                sb.AppendLine("未找到相关搜索结果");
-                return sb.ToString().Trim();
+                Log("AnySearch 未找到相关结果");
+                return null;
             }
 
             sb.AppendLine($"## AnySearch 搜索结果（共 {results.Count} 条）");
+            sb.AppendLine($"查询: {query}");
             if (total > results.Count)
                 sb.AppendLine($"（总计 {total} 条）");
             sb.AppendLine();
             int n = 1;
             foreach (var r in results)
             {
-                var title = r?["title"]?.ToString() ?? "";
-                var url = r?["url"]?.ToString() ?? "";
-                // content 可能为空，fallback 到 snippet
+                if (r is not JsonObject)
+                { Log("AnySearch 返回了无效搜索条目"); return null; }
+                // 官方允许空标题，但每条搜索结果必须有源 URL。
+                if (r["url"] is not JsonValue urlValue || urlValue.TryGetValue<string>(out string? url) == false
+                    || string.IsNullOrWhiteSpace(url))
+                { Log("AnySearch 搜索条目缺少有效源链接"); return null; }
+                var title = r["title"]?.ToString() ?? "";
+                // 优先使用与查询相关的摘要；全文可能是整页内容，按需用 ExtractWebpage 阅读。
                 var content = r?["content"]?.ToString() ?? "";
                 var snippet = r?["snippet"]?.ToString() ?? "";
-                var body = string.IsNullOrWhiteSpace(content) ? snippet : content;
+                var body = string.IsNullOrWhiteSpace(snippet) ? content : snippet;
 
                 sb.AppendLine($"### {n}. {title}");
                 sb.AppendLine($"链接: {url}");
@@ -596,23 +606,23 @@ public class SmartWebSearch(
         }
         catch (Exception ex)
         {
-            Log($"AnySearch 格式化异常: {ex.Message}");
-            return $"搜索完成但结果解析失败:\n{rawJson}";
+            Log($"AnySearch 响应解析失败（{ex.GetType().Name}）");
+            return null;
         }
     }
 
-    /// <summary>解析 AnySearch 错误信息（message 字段），失败时返回原始文本截断。</summary>
+    // HTTP 402 的 message 可能包含自动生成的账号/密码/API Key；诊断只保留 request_id。
     static string ExtractAnySearchError(string raw)
     {
         try
         {
             var node = JsonNode.Parse(raw);
-            var msg = node?["message"]?.ToString() ?? "";
-            if (!string.IsNullOrWhiteSpace(msg))
-                return msg.Length > 200 ? msg[..200] : msg;
+            string requestId = node?["request_id"]?.ToString() ?? "";
+            if (requestId.Length is > 0 and <= 100 && Regex.IsMatch(requestId, "^[A-Za-z0-9._-]+$"))
+                return $"request_id={requestId}";
         }
         catch { }
-        return raw.Length > 200 ? raw[..200] : raw;
+        return "request_id=unknown";
     }
 
     // === 批量搜索 ===
@@ -629,7 +639,10 @@ public class SmartWebSearch(
         if (string.IsNullOrWhiteSpace(queries)) { interactor.Poke("查询数组不能为空"); return; }
 
         var cfg = Configuration ?? new SmartWebSearchConfig();
-        var hasKey = !string.IsNullOrWhiteSpace(cfg.AnySearchApiKey);
+        if (cfg.IsEngineEnabled("anysearch") == false)
+        { interactor.Poke("AnySearch 未启用，请先在插件设置中勾选该引擎"); return; }
+        if (string.IsNullOrWhiteSpace(paramsStr) == false && string.IsNullOrWhiteSpace(tag))
+        { interactor.Poke("提供垂直参数时还需指定 tag；请先用 GetSubDomains 查询标签及参数"); return; }
 
         List<AnySearchQueryItem> items;
         try { items = ParseBatchQueries(queries); }
@@ -646,7 +659,8 @@ public class SmartWebSearch(
             var useZone = string.IsNullOrWhiteSpace(zone) ? (isChinese ? "cn" : "intl") : zone;
             var useLang = string.IsNullOrWhiteSpace(language) ? (isChinese ? "zh-CN" : "en") : language;
             var maxResults = Math.Clamp(item.MaxResults ?? cfg.MaxResults, 1, 10);
-            var cacheKey = $"anysearch:{item.Query}:{tag}:{paramsStr}:{useZone}:{useLang}:{maxResults}:{hasKey}";
+            string cacheKey = BuildAnySearchCacheKey("search", cfg.AnySearchApiKey,
+                item.Query, tag, paramsStr, useZone, useLang, maxResults.ToString(CultureInfo.InvariantCulture));
             queriesDesc.Add(item.Query);
             tasks.Add(AnySearchCallAsync(item.Query, tag, paramsStr, useZone, useLang, maxResults, cacheKey, cfg));
         }
@@ -697,8 +711,9 @@ public class SmartWebSearch(
         if (string.IsNullOrWhiteSpace(url)) { interactor.Poke("URL不能为空"); return; }
 
         var cfg = Configuration ?? new SmartWebSearchConfig();
-        var hasKey = !string.IsNullOrWhiteSpace(cfg.AnySearchApiKey);
-        var cacheKey = $"anysearch-extract:{url}:{hasKey}";
+        if (cfg.IsEngineEnabled("anysearch") == false)
+        { interactor.Poke("AnySearch 未启用，请先在插件设置中勾选该引擎"); return; }
+        string cacheKey = BuildAnySearchCacheKey("extract", cfg.AnySearchApiKey, url);
 
         string? result;
         if (TryGetCached(cfg, cacheKey, out var cached))
@@ -723,8 +738,9 @@ public class SmartWebSearch(
             HttpRequestMessage MakeRequest() => BuildAnySearchRequest(HttpMethod.Post, AnySearchExtractUrl, body, key);
 
             Log($"AnySearch 提取网页: {url}");
-            using var resp = await _http.SendAsync(MakeRequest());
-            var raw = await resp.Content.ReadAsStringAsync();
+            using HttpRequestMessage request = MakeRequest();
+            using var resp = await _http.SendAsync(request, DestroyCancellationToken);
+            var raw = await resp.Content.ReadAsStringAsync(DestroyCancellationToken);
 
             if (!resp.IsSuccessStatusCode)
             {
@@ -733,15 +749,17 @@ public class SmartWebSearch(
             }
 
             var formatted = FormatAnySearchExtract(raw);
+            if (formatted == null) return null;
             Log("AnySearch 网页提取成功");
             if (cacheKey != null) SaveCache(cfg, cacheKey, formatted);
             return formatted;
         }
+        catch (OperationCanceledException) when (DestroyCancellationToken.IsCancellationRequested) { throw; }
         catch (TaskCanceledException) { Log("AnySearch 提取超时"); return null; }
-        catch (Exception ex) { Log($"AnySearch 提取异常: {ex.Message}"); return null; }
+        catch (Exception ex) { Log($"AnySearch 提取请求异常（{ex.GetType().Name}）"); return null; }
     }
 
-    static string FormatAnySearchExtract(string rawJson)
+    static string? FormatAnySearchExtract(string rawJson)
     {
         try
         {
@@ -749,11 +767,10 @@ public class SmartWebSearch(
             var sb = new StringBuilder();
 
             var code = node?["code"]?.ToString();
-            if (code != null && code != "0")
+            if (node is not JsonObject || code != "0")
             {
-                var msg = node?["message"]?.ToString() ?? "";
-                sb.AppendLine($"网页提取失败: {(string.IsNullOrWhiteSpace(msg) ? "未知错误" : msg)}");
-                return sb.ToString().Trim();
+                Log($"AnySearch 网页提取业务失败（{ExtractAnySearchError(rawJson)}）");
+                return null;
             }
 
             var data = node?["data"];
@@ -766,14 +783,14 @@ public class SmartWebSearch(
             if (!string.IsNullOrWhiteSpace(title)) sb.AppendLine($"标题: {title}");
             if (!string.IsNullOrWhiteSpace(url)) sb.AppendLine($"来源: {url}");
             if (!string.IsNullOrWhiteSpace(content)) { sb.AppendLine(); sb.AppendLine(content); }
-            else sb.AppendLine("未提取到有效内容");
+            else { Log("AnySearch 未提取到有效网页内容"); return null; }
 
             return sb.ToString().Trim();
         }
         catch (Exception ex)
         {
-            Log($"AnySearch 提取 格式化异常: {ex.Message}");
-            return $"网页提取完成但结果解析失败:\n{rawJson}";
+            Log($"AnySearch 提取响应解析失败（{ex.GetType().Name}）");
+            return null;
         }
     }
 
@@ -787,8 +804,9 @@ public class SmartWebSearch(
         if (string.IsNullOrWhiteSpace(domain)) { interactor.Poke("领域不能为空"); return; }
 
         var cfg = Configuration ?? new SmartWebSearchConfig();
-        var hasKey = !string.IsNullOrWhiteSpace(cfg.AnySearchApiKey);
-        var cacheKey = $"anysearch-subdomains:{domain}:{hasKey}";
+        if (cfg.IsEngineEnabled("anysearch") == false)
+        { interactor.Poke("AnySearch 未启用，请先在插件设置中勾选该引擎"); return; }
+        string cacheKey = BuildAnySearchCacheKey("subdomains", cfg.AnySearchApiKey, domain);
 
         string? result;
         if (TryGetCached(cfg, cacheKey, out var cached))
@@ -809,12 +827,16 @@ public class SmartWebSearch(
         try
         {
             var key = cfg.AnySearchApiKey;
-            var url = $"{AnySearchSubDomainsUrl}?domain={Uri.EscapeDataString(domain)}";
+            string domainsQuery = string.Join("&", domain.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Distinct(StringComparer.OrdinalIgnoreCase).Select(item => $"domain={Uri.EscapeDataString(item)}"));
+            if (domainsQuery.Length == 0) return null;
+            string url = $"{AnySearchSubDomainsUrl}?{domainsQuery}";
             HttpRequestMessage MakeRequest() => BuildAnySearchRequest(HttpMethod.Get, url, null, key);
 
             Log($"AnySearch 查询垂直领域: {domain}");
-            using var resp = await _http.SendAsync(MakeRequest());
-            var raw = await resp.Content.ReadAsStringAsync();
+            using HttpRequestMessage request = MakeRequest();
+            using var resp = await _http.SendAsync(request, DestroyCancellationToken);
+            var raw = await resp.Content.ReadAsStringAsync(DestroyCancellationToken);
 
             if (!resp.IsSuccessStatusCode)
             {
@@ -823,15 +845,17 @@ public class SmartWebSearch(
             }
 
             var formatted = FormatAnySearchSubDomains(raw, domain);
+            if (formatted == null) return null;
             Log("AnySearch 领域目录查询成功");
             if (cacheKey != null) SaveCache(cfg, cacheKey, formatted);
             return formatted;
         }
+        catch (OperationCanceledException) when (DestroyCancellationToken.IsCancellationRequested) { throw; }
         catch (TaskCanceledException) { Log("AnySearch 子域查询超时"); return null; }
-        catch (Exception ex) { Log($"AnySearch 子域查询异常: {ex.Message}"); return null; }
+        catch (Exception ex) { Log($"AnySearch 子域请求异常（{ex.GetType().Name}）"); return null; }
     }
 
-    static string FormatAnySearchSubDomains(string rawJson, string domain)
+    static string? FormatAnySearchSubDomains(string rawJson, string domain)
     {
         try
         {
@@ -839,52 +863,58 @@ public class SmartWebSearch(
             var sb = new StringBuilder();
 
             var code = node?["code"]?.ToString();
-            if (code != null && code != "0")
+            if (node is not JsonObject || code != "0")
             {
-                var msg = node?["message"]?.ToString() ?? "";
-                sb.AppendLine($"领域目录查询失败: {(string.IsNullOrWhiteSpace(msg) ? "未知错误" : msg)}");
-                return sb.ToString().Trim();
+                Log($"AnySearch 领域目录业务失败（{ExtractAnySearchError(rawJson)}）");
+                return null;
             }
 
-            var data = node?["data"];
+            if (node?["data"]?["domains"] is not JsonArray domains)
+            { Log("AnySearch 领域目录响应缺少有效 domains 数组"); return null; }
             sb.AppendLine($"## AnySearch 垂直领域目录: {domain}");
             sb.AppendLine();
 
-            // data 可能是数组，或 { sub_domains: [...] }
-            var subDomains = data as JsonArray ?? data?["sub_domains"]?.AsArray();
-            if (subDomains == null || subDomains.Count == 0)
+            if (domains.Count == 0)
             {
-                sb.AppendLine("该领域暂无可用的垂直子域，可尝试通用搜索");
+                sb.AppendLine("所查询领域暂无可用的垂直标签，可尝试通用搜索");
                 return sb.ToString().Trim();
             }
 
-            foreach (var sd in subDomains)
+            foreach (JsonNode? domainNode in domains)
             {
-                var name = sd?["sub_domain"]?.ToString() ?? sd?["name"]?.ToString() ?? sd?.ToString() ?? "";
-                var desc = sd?["description"]?.ToString() ?? "";
-                var paramsArr = sd?["params"]?.AsArray() ?? sd?["parameters"]?.AsArray();
-
-                sb.AppendLine($"### {name}");
-                if (!string.IsNullOrWhiteSpace(desc)) sb.AppendLine(desc);
-                if (paramsArr != null && paramsArr.Count > 0)
+                if (domainNode?["sub_domains"] is not JsonArray subDomains)
+                { Log("AnySearch 领域目录缺少有效 sub_domains 数组"); return null; }
+                string domainName = domainNode?["domain"]?.ToString() ?? "";
+                sb.AppendLine($"### 领域: {domainName}");
+                foreach (JsonNode? subDomain in subDomains)
                 {
-                    sb.AppendLine("参数:");
-                    foreach (var p in paramsArr)
+                    string name = subDomain?["sub_domain"]?.ToString() ?? "";
+                    if (string.IsNullOrWhiteSpace(name))
+                    { Log("AnySearch 领域目录返回了无效垂直标签"); return null; }
+                    string description = subDomain?["description"]?.ToString() ?? "";
+                    sb.AppendLine($"#### tag: {name}");
+                    if (string.IsNullOrWhiteSpace(description) == false) sb.AppendLine(description);
+                    if (subDomain?["params"] is JsonNode parametersNode && parametersNode is not JsonObject)
+                    { Log("AnySearch 领域目录返回了无效参数定义"); return null; }
+                    if (subDomain?["params"] is JsonObject parameters && parameters.Count > 0)
                     {
-                        var pName = p?["name"]?.ToString() ?? p?.ToString() ?? "";
-                        var isReq = (p?["required"]?.ToString() ?? "").Equals("true", StringComparison.OrdinalIgnoreCase) || JInt(p, "required") == 1;
-                        var pDesc = p?["description"]?.ToString() ?? "";
-                        sb.AppendLine($"  - {pName}{(isReq ? " (必填)" : "")}{(string.IsNullOrWhiteSpace(pDesc) ? "" : $": {pDesc}")}");
+                        sb.AppendLine("参数（还需遵守参数说明中的条件要求）:");
+                        foreach (KeyValuePair<string, JsonNode?> parameter in parameters.OrderBy(item => JInt(item.Value, "sort_order", int.MaxValue)))
+                        {
+                            bool required = bool.TryParse(parameter.Value?["required"]?.ToString(), out bool value) && value;
+                            string parameterDescription = parameter.Value?["description"]?.ToString() ?? "";
+                            sb.AppendLine($"  - {parameter.Key}{(required ? " (必填)" : " (可选)")}: {parameterDescription}");
+                        }
                     }
+                    sb.AppendLine();
                 }
-                sb.AppendLine();
             }
             return sb.ToString().Trim();
         }
         catch (Exception ex)
         {
-            Log($"AnySearch 子域 格式化异常: {ex.Message}");
-            return $"领域目录查询完成但结果解析失败:\n{rawJson}";
+            Log($"AnySearch 领域目录响应解析失败（{ex.GetType().Name}）");
+            return null;
         }
     }
 
@@ -903,6 +933,8 @@ public class SmartWebSearch(
         if (string.IsNullOrWhiteSpace(query)) { interactor.Poke("搜索关键词不能为空"); return; }
 
         var cfg = Configuration ?? new SmartWebSearchConfig();
+        if (cfg.IsEngineEnabled("baidu") == false)
+        { interactor.Poke("百度引擎未启用，请先在插件设置中勾选百度"); return; }
         if (!GetBaiduKeys(cfg).Any(k => !string.IsNullOrWhiteSpace(k)))
         { interactor.Poke("AI总结搜索需要百度千帆API Key"); return; }
 
@@ -991,6 +1023,8 @@ public class SmartWebSearch(
         if (string.IsNullOrWhiteSpace(query)) { interactor.Poke("搜索关键词不能为空"); return; }
 
         var cfg = Configuration ?? new SmartWebSearchConfig();
+        if (cfg.IsEngineEnabled("baidu") == false)
+        { interactor.Poke("百度引擎未启用，请先在插件设置中勾选百度"); return; }
         if (!GetBaiduKeys(cfg).Any(k => !string.IsNullOrWhiteSpace(k)))
         { interactor.Poke("智能搜索生成需要百度千帆API Key"); return; }
 
@@ -1080,6 +1114,8 @@ public class SmartWebSearch(
         [Description("数量，默认10，最多50")] int? maxResults = null)
     {
         var cfg = Configuration ?? new SmartWebSearchConfig();
+        if (cfg.IsEngineEnabled("baidu") == false)
+        { interactor.Poke("百度引擎未启用，请先在插件设置中勾选百度"); return; }
         if (!GetBaiduKeys(cfg).Any(k => !string.IsNullOrWhiteSpace(k))) { interactor.Poke("百度热搜需要百度千帆API Key"); return; }
 
         var validTabs = new[] { "livelihood", "finance", "sports", "new_entertainment", "internation_news", "challenge", "movie", "teleplay", "novel" };
@@ -1151,6 +1187,8 @@ public class SmartWebSearch(
         if (string.IsNullOrWhiteSpace(imageUrl)) { interactor.Poke("图片URL不能为空"); return; }
 
         var cfg = Configuration ?? new SmartWebSearchConfig();
+        if (cfg.IsEngineEnabled("baidu") == false)
+        { interactor.Poke("百度引擎未启用，请先在插件设置中勾选百度"); return; }
         if (!GetBaiduKeys(cfg).Any(k => !string.IsNullOrWhiteSpace(k))) { interactor.Poke("智能识图需要百度千帆API Key"); return; }
 
         string imageBase64;
@@ -1952,7 +1990,7 @@ public class SmartWebSearch(
     {
         var t = info?["title"]?.AsObject();
         var candidates = new[] { t?["chinese"], t?["native"], t?["romaji"], t?["english"] }
-            .Select(v => v?.ToString()).Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(v => v?.ToString() ?? "").Where(s => !string.IsNullOrWhiteSpace(s))
             .Distinct().ToList();
         if (candidates.Count == 0) return "";
         return candidates.Count == 1 ? candidates[0] : $"{candidates[0]}（{candidates[1]}）";
@@ -2049,38 +2087,23 @@ public class SmartWebSearch(
 
     #region 引擎路由逻辑
 
-    /// <summary>
-    /// 根据参数、配置和查询语言确定搜索顺序
-    /// </summary>
-    static List<string> ResolveSearchOrder(string? engineParam, string configEngine,
-        string query, bool hasTavily, bool hasBaidu)
+    static bool IsEngineReady(string engine, SmartWebSearchConfig cfg) => engine switch
     {
-        var order = new List<string>();
+        "anysearch" => true,
+        "tavily" => GetTavilyKeys(cfg).Any(k => string.IsNullOrWhiteSpace(k) == false),
+        "baidu" => GetBaiduKeys(cfg).Any(k => string.IsNullOrWhiteSpace(k) == false),
+        "deepseek" => string.IsNullOrWhiteSpace(cfg.DeepSeekApiKey) == false,
+        _ => false,
+    };
 
-        // 1. AI显式指定引擎
-        if (!string.IsNullOrWhiteSpace(engineParam))
-        {
-            var e = engineParam.ToLower().Trim();
-            if (e == "tavily" && hasTavily) { order.Add("tavily"); return order; }
-            if (e == "baidu" && hasBaidu) { order.Add("baidu"); return order; }
-            if (e == "anysearch") { order.Add("anysearch"); return order; }
-        }
-
-        // 2. 配置指定单引擎
-        if (configEngine == "tavily" && hasTavily) { order.Add("tavily"); return order; }
-        if (configEngine == "baidu" && hasBaidu) { order.Add("baidu"); return order; }
-        if (configEngine == "anysearch") { order.Add("anysearch"); return order; }
-
-        // 3. auto 智能路由：按语言选主引擎，AnySearch 免Key兜底，另一个作为备选
-        if (!hasTavily && !hasBaidu) { order.Add("anysearch"); return order; }
-        if (!hasBaidu) { order.Add("tavily"); order.Add("anysearch"); return order; }
-        if (!hasTavily) { order.Add("baidu"); order.Add("anysearch"); return order; }
-
-        var primary = IsChineseQuery(query) ? "baidu" : "tavily";
-        order.Add(primary);
-        order.Add(primary == "tavily" ? "baidu" : "tavily");
-        order.Add("anysearch");
-        return order;
+    static List<string> ResolveSearchOrder(string? engine, SmartWebSearchConfig cfg, string query)
+    {
+        string[] priority = engine != null ? new[] { engine }
+            : IsChineseQuery(query)
+                ? new[] { "baidu", "tavily", "deepseek", "anysearch" }
+                : new[] { "tavily", "baidu", "deepseek", "anysearch" };
+        IReadOnlyList<string> selected = cfg.GetEnabledEngines();
+        return priority.Where(id => selected.Contains(id) && IsEngineReady(id, cfg)).ToList();
     }
 
     /// <summary>
@@ -2097,7 +2120,7 @@ public class SmartWebSearch(
     #region Tavily 搜索
 
     async Task<string?> TryTavilySearch(string query, string depth, string? topic,
-        string? timeRange, int results, string cacheKey, SmartWebSearchConfig cfg)
+        string? timeRange, int results, SmartWebSearchConfig cfg)
     {
         var body = new JsonObject
         {
@@ -2110,14 +2133,16 @@ public class SmartWebSearch(
         if (!string.IsNullOrWhiteSpace(timeRange)) body["time_range"] = timeRange;
 
         return await TavilyCallWithRotationAsync(TavilyUrl, body.ToJsonString(),
-            cacheKey, "Tavily", raw => FormatTavilyResults(raw, query), cfg);
+            "search", "Tavily", raw => FormatTavilyResults(raw, query), cfg);
     }
 
-    static string FormatTavilyResults(string rawJson, string query)
+    static string? FormatTavilyResults(string rawJson, string query)
     {
         try
         {
             var node = JsonNode.Parse(rawJson);
+            if (node is not JsonObject || node["results"] is not JsonArray)
+            { Log("Tavily 响应缺少有效 results 数组"); return null; }
             var sb = new StringBuilder();
 
             var answer = node?["answer"]?.ToString();
@@ -2154,8 +2179,8 @@ public class SmartWebSearch(
         }
         catch (Exception ex)
         {
-            Log($"Tavily 格式化异常: {ex.Message}");
-            return $"搜索完成但结果解析失败:\n{rawJson}";
+            Log($"Tavily 响应解析失败（{ex.GetType().Name}）");
+            return null;
         }
     }
 
@@ -2164,7 +2189,7 @@ public class SmartWebSearch(
     #region 百度搜索
 
     async Task<string?> TryBaiduSearch(string query, string depth, string? timeRange,
-        int results, bool? includeImages, bool? includeVideos, string cacheKey, SmartWebSearchConfig cfg)
+        int results, bool? includeImages, bool? includeVideos, SmartWebSearchConfig cfg)
     {
         // 百度query限制72字符（汉字算2字符）
         var truncatedQuery = TruncateForBaidu(query);
@@ -2193,18 +2218,19 @@ public class SmartWebSearch(
         ApplyTimeRange(body, timeRange);
 
         return await BaiduCallWithRotationAsync(BaiduUrl, body.ToJsonString(),
-            cacheKey, "百度", raw => FormatBaiduResults(raw, query), cfg);
+            "search", "百度", raw => FormatBaiduResults(raw, query), cfg, reportBusinessErrors: false);
     }
 
-    static string FormatBaiduResults(string rawJson, string query)
+    static string? FormatBaiduResults(string rawJson, string query)
     {
         try
         {
             var node = JsonNode.Parse(rawJson);
             var sb = new StringBuilder();
 
-            var refs = node?["references"]?.AsArray();
-            if (refs == null || refs.Count == 0)
+            if (node is not JsonObject || node["references"] is not JsonArray refs)
+            { Log("百度搜索响应缺少有效 references 数组"); return null; }
+            if (refs.Count == 0)
             {
                 sb.AppendLine("未找到相关搜索结果");
                 return sb.ToString().Trim();
@@ -2292,8 +2318,8 @@ public class SmartWebSearch(
         }
         catch (Exception ex)
         {
-            Log($"百度 格式化异常: {ex.Message}");
-            return $"搜索完成但结果解析失败:\n{rawJson}";
+            Log($"百度搜索响应解析失败（{ex.GetType().Name}）");
+            return null;
         }
     }
 
@@ -2327,8 +2353,10 @@ public class SmartWebSearch(
     /// </summary>
     async Task<string?> BaiduCallWithRotationAsync(
         string url, string bodyJson, string? cacheKey, string label,
-        Func<string, string> formatter, SmartWebSearchConfig cfg, bool isGet = false)
+        Func<string, string?> formatter, SmartWebSearchConfig cfg, bool isGet = false, bool reportBusinessErrors = true)
     {
+        if (cacheKey != null)
+            cacheKey = BuildProviderCacheKey("baidu", url, bodyJson, cacheKey, GetBaiduKeys(cfg));
         // 缓存命中
         if (cacheKey != null && TryGetCached(cfg, cacheKey, out var cached))
         {
@@ -2352,8 +2380,8 @@ public class SmartWebSearch(
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
                 if (!isGet) req.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
 
-                using var resp = await _http.SendAsync(req);
-                var raw = await resp.Content.ReadAsStringAsync();
+                using var resp = await _http.SendAsync(req, DestroyCancellationToken);
+                var raw = await resp.Content.ReadAsStringAsync(DestroyCancellationToken);
 
                 // 401/403：账号认证失败，切换下一个
                 if ((int)resp.StatusCode == 401 || (int)resp.StatusCode == 403)
@@ -2367,12 +2395,12 @@ public class SmartWebSearch(
                 if ((int)resp.StatusCode == 429)
                 {
                     Log($"{label} 账号{idx + 1}频率限制，等待2秒重试");
-                    await Task.Delay(2000);
+                    await Task.Delay(2000, DestroyCancellationToken);
                     using var req2 = new HttpRequestMessage(isGet ? HttpMethod.Get : HttpMethod.Post, url);
                     req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
                     if (!isGet) req2.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
-                    using var resp2 = await _http.SendAsync(req2);
-                    raw = await resp2.Content.ReadAsStringAsync();
+                    using var resp2 = await _http.SendAsync(req2, DestroyCancellationToken);
+                    raw = await resp2.Content.ReadAsStringAsync(DestroyCancellationToken);
 
                     if (!resp2.IsSuccessStatusCode)
                     {
@@ -2385,9 +2413,10 @@ public class SmartWebSearch(
                     }
 
                     var retryBizError = BaiduBusinessErrorText(raw, label);
-                    if (retryBizError != null) { Log($"{label} 业务错误(重试): {retryBizError}"); return retryBizError; }
+                    if (retryBizError != null) { Log($"{label} 业务错误(重试): {retryBizError}"); return reportBusinessErrors ? retryBizError : null; }
 
                     var retryResult = formatter(raw);
+                    if (retryResult == null) continue;
                     Log($"{label}[{idx + 1}]成功(重试)");
                     if (cacheKey != null) SaveCache(cfg, cacheKey, retryResult);
                     return retryResult;
@@ -2421,15 +2450,17 @@ public class SmartWebSearch(
                         continue;
                     }
                     Log($"{label} 业务错误(code={bizCode}): {bizMsg}");
-                    return bizErrorText;
+                    return reportBusinessErrors ? bizErrorText : null;
                 }
 
                 // 成功
                 var formatted = formatter(raw);
+                if (formatted == null) continue;
                 Log($"{label}[{idx + 1}]成功");
                 if (cacheKey != null) SaveCache(cfg, cacheKey, formatted);
                 return formatted;
             }
+            catch (OperationCanceledException) when (DestroyCancellationToken.IsCancellationRequested) { throw; }
             catch (TaskCanceledException) { Log($"{label} 账号{idx + 1}超时"); continue; }
             catch (Exception ex) { Log($"{label} 账号{idx + 1}异常: {ex.Message}"); continue; }
         }
@@ -2447,8 +2478,10 @@ public class SmartWebSearch(
     /// </summary>
     async Task<string?> TavilyCallWithRotationAsync(
         string url, string bodyJson, string? cacheKey, string label,
-        Func<string, string> formatter, SmartWebSearchConfig cfg)
+        Func<string, string?> formatter, SmartWebSearchConfig cfg)
     {
+        if (cacheKey != null)
+            cacheKey = BuildProviderCacheKey("tavily", url, bodyJson, cacheKey, GetTavilyKeys(cfg));
         if (cacheKey != null && TryGetCached(cfg, cacheKey, out var cached))
         {
             Log($"缓存命中({label})");
@@ -2470,8 +2503,8 @@ public class SmartWebSearch(
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
                 req.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
 
-                using var resp = await _http.SendAsync(req);
-                var raw = await resp.Content.ReadAsStringAsync();
+                using var resp = await _http.SendAsync(req, DestroyCancellationToken);
+                var raw = await resp.Content.ReadAsStringAsync(DestroyCancellationToken);
 
                 // 额度耗尽：432(Key/Plan Limit) / 433(PayGo Limit)
                 if ((int)resp.StatusCode == 432 || (int)resp.StatusCode == 433)
@@ -2485,12 +2518,12 @@ public class SmartWebSearch(
                 if ((int)resp.StatusCode == 429)
                 {
                     Log($"{label} 账号 {idx + 1} 频率限制，等待2秒重试");
-                    await Task.Delay(2000);
+                    await Task.Delay(2000, DestroyCancellationToken);
                     using var req2 = new HttpRequestMessage(HttpMethod.Post, url);
                     req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
                     req2.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
-                    using var resp2 = await _http.SendAsync(req2);
-                    raw = await resp2.Content.ReadAsStringAsync();
+                    using var resp2 = await _http.SendAsync(req2, DestroyCancellationToken);
+                    raw = await resp2.Content.ReadAsStringAsync(DestroyCancellationToken);
 
                     if (!resp2.IsSuccessStatusCode)
                     {
@@ -2502,6 +2535,7 @@ public class SmartWebSearch(
                     }
 
                     var retryResult = formatter(raw);
+                    if (retryResult == null) continue;
                     Log($"{label} [{idx + 1}] 搜索成功（重试）");
                     if (cacheKey != null) SaveCache(cfg, cacheKey, retryResult);
                     return retryResult;
@@ -2530,10 +2564,12 @@ public class SmartWebSearch(
 
                 // 成功
                 var formatted = formatter(raw);
+                if (formatted == null) continue;
                 Log($"{label} [{idx + 1}] 搜索成功");
                 if (cacheKey != null) SaveCache(cfg, cacheKey, formatted);
                 return formatted;
             }
+            catch (OperationCanceledException) when (DestroyCancellationToken.IsCancellationRequested) { throw; }
             catch (TaskCanceledException) { Log($"{label} 账号 {idx + 1} 超时"); continue; }
             catch (Exception ex) { Log($"{label} 账号 {idx + 1} 异常: {ex.Message}"); continue; }
         }
@@ -2544,6 +2580,13 @@ public class SmartWebSearch(
     #endregion
 
     #region 缓存与辅助
+
+    static string BuildProviderCacheKey(string provider, string url, string bodyJson, string operation, IEnumerable<string> keys)
+    {
+        string authentication = JsonSerializer.Serialize(keys.Where(k => string.IsNullOrWhiteSpace(k) == false).Select(k => k.Trim()));
+        string scope = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(authentication)));
+        return $"{provider}-v2:{scope}:{JsonSerializer.Serialize(new[] { url, bodyJson, operation })}";
+    }
 
     /// <summary>
     /// 检查缓存命中，命中返回 true 并通过 out 返回结果

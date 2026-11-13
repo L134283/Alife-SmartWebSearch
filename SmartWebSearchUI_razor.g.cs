@@ -1,460 +1,173 @@
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using Alife.Framework;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Rendering;
+using Microsoft.AspNetCore.Components.Web;
 using AntDesign;
 
 namespace Alife.Plugin.SmartWebSearch;
 
 public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSearchConfig>
 {
-    const string Css = @"
-/* === 基础容器：深紫圣殿 + 粉光晕 + 曼陀罗光轮 === */
-.sws-container {
-    background:
-        /* 曼陀罗：金色放射线 15° 间隔 */
-        repeating-conic-gradient(
-            from 0deg at 50% 50%,
-            rgba(212,175,55,0.030) 0deg, rgba(212,175,55,0.030) 0.8deg,
-            transparent 0.8deg, transparent 15deg
-        ),
-        /* 曼陀罗：粉色放射线 offset 7.5° 交错 */
-        repeating-conic-gradient(
-            from 7.5deg at 50% 50%,
-            rgba(255,94,138,0.022) 0deg, rgba(255,94,138,0.022) 0.8deg,
-            transparent 0.8deg, transparent 15deg
-        ),
-        /* 曼陀罗：银色放射线 offset 3.75° 交错 */
-        repeating-conic-gradient(
-            from 3.75deg at 50% 50%,
-            rgba(196,181,212,0.018) 0deg, rgba(196,181,212,0.018) 0.5deg,
-            transparent 0.5deg, transparent 7.5deg
-        ),
-        /* 粉光晕（左上） */
-        radial-gradient(circle at 20% 10%, rgba(255,94,138,0.10) 0%, transparent 45%),
-        /* 月华银光（右下） */
-        radial-gradient(circle at 80% 85%, rgba(196,181,212,0.08) 0%, transparent 45%),
-        /* 祭坛金心（中心） */
-        radial-gradient(circle at 50% 50%, rgba(212,175,55,0.04) 0%, transparent 60%),
-        /* 基底深紫渐变 */
-        linear-gradient(135deg, #15081f 0%, #2a0e2f 100%);
-    padding: 26px 24px;
-    border-radius: 14px;
-    border: 1px solid rgba(212,175,55,0.28);
-    max-width: 680px;
-    color: #fff5f1;
+    const string Css = """
+.sws-workspace {
+    width: 100%; min-width: 0; color: var(--alife-text);
     font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-    position: relative;
-    box-shadow: 0 0 36px rgba(255,94,138,0.18), inset 0 0 80px rgba(196,61,104,0.06);
+    font-size: 13px; line-height: 1.65; container-type: inline-size; overflow-wrap: anywhere;
 }
-
-/* 角落缓慢旋转的封印 */
-.sws-container::before {
-    content: '✦';
-    position: absolute;
-    top: 14px; right: 18px;
-    font-size: 14px;
-    color: rgba(212,175,55,0.35);
-    animation: sws-sigil 22s linear infinite;
-    pointer-events: none;
+.sws-workspace, .sws-workspace * { box-sizing: border-box; }
+.sws-workspace h2, .sws-workspace h3, .sws-workspace p { margin: 0; }
+.sws-hero {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    flex-wrap: wrap; gap: 14px; padding: 22px; margin-bottom: 14px;
+    background: linear-gradient(125deg, var(--alife-primary-bg), var(--alife-bg-container));
+    border: 1px solid var(--alife-primary-border); border-radius: var(--alife-radius-lg);
 }
-.sws-container::after {
-    content: '⛤';
-    position: absolute;
-    bottom: 14px; left: 18px;
-    font-size: 12px;
-    color: rgba(196,181,212,0.25);
-    animation: sws-sigil 28s linear infinite reverse;
-    pointer-events: none;
+.sws-hero-heading { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.sws-hero-heading > div { min-width: 0; }
+.sws-hero-icon {
+    display: grid; place-items: center; flex: 0 0 44px; width: 44px; height: 44px;
+    border-radius: var(--alife-radius); background: var(--alife-primary-bg);
+    color: var(--alife-primary); font-size: 25px; font-weight: 600;
 }
-
-/* === 头部圣徽 === */
-.sws-header {
-    text-align: center;
-    margin-bottom: 18px;
-    padding-top: 22px;
-    padding-bottom: 14px;
-    border-bottom: 1px solid rgba(212,175,55,0.22);
-    position: relative;
+.sws-workspace .sws-title { font-size: 21px; font-weight: 650; line-height: 1.35; letter-spacing: .2px; }
+.sws-subtitle { margin-top: 4px !important; color: var(--alife-text-secondary); }
+.sws-scope {
+    flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+    padding: 4px 10px; border: 1px solid var(--alife-border); border-radius: 999px;
+    background: var(--alife-bg-container); color: var(--alife-text-secondary); font-size: 12px;
 }
-/* 标题上方漂浮五芒星 orb */
-.sws-header::before {
-    content: '⛤';
-    position: absolute;
-    top: 0; left: 50%;
-    transform: translateX(-50%);
-    font-size: 16px;
-    color: #d4af37;
-    text-shadow:
-        0 0 8px rgba(212,175,55,0.9),
-        0 0 16px rgba(212,175,55,0.5),
-        0 0 24px rgba(255,94,138,0.3);
-    animation: sws-halo-gold 2.6s ease-in-out infinite, sws-orb-float 5s ease-in-out infinite;
-    pointer-events: none;
-    z-index: 1;
+.sws-steps {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px; margin-bottom: 14px;
 }
-.sws-header::after {
-    content: '◈ ◇ ◈';
-    position: absolute;
-    bottom: -7px; left: 50%;
-    transform: translateX(-50%);
-    background: linear-gradient(135deg, #15081f 0%, #2a0e2f 100%);
-    padding: 0 10px;
-    color: #d4af37;
-    font-size: 10px;
-    letter-spacing: 4px;
-    text-shadow: 0 0 6px rgba(212,175,55,0.5);
+.sws-step {
+    display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px;
+    border: 1px solid var(--alife-border); border-radius: var(--alife-radius);
+    background: var(--alife-bg-container); min-width: 0;
 }
-.sws-title {
-    font-size: 19px;
-    font-weight: bold;
-    color: #ff8fb1;
-    letter-spacing: 2px;
-    text-shadow: 0 0 12px rgba(255,94,138,0.5), 0 0 24px rgba(196,61,104,0.3);
-    animation: sws-halo 3.2s ease-in-out infinite;
+.sws-step-number {
+    display: grid; place-items: center; width: 24px; height: 24px; flex: 0 0 24px;
+    background: var(--alife-primary-bg); color: var(--alife-primary);
+    border-radius: 50%; font-weight: 650; font-variant-numeric: tabular-nums;
 }
-.sws-subtitle {
-    font-size: 11px;
-    color: #c4b5d4;
-    margin-top: 7px;
-    letter-spacing: 4px;
-    opacity: 0.7;
-}
-
-/* === 引言卷轴 === */
-.sws-intro {
-    background: rgba(255,94,138,0.06);
-    border: 1px solid rgba(255,94,138,0.20);
-    border-left: 3px solid #ff5e8a;
-    border-radius: 8px;
-    padding: 12px 14px;
-    margin-bottom: 18px;
-    display: flex;
-    gap: 12px;
-    align-items: flex-start;
-}
-.sws-intro-sigil {
-    color: #d4af37;
-    font-size: 20px;
-    text-shadow: 0 0 8px rgba(212,175,55,0.6);
-    animation: sws-float 4s ease-in-out infinite;
-    flex-shrink: 0;
-}
-.sws-intro-text {
-    font-size: 12px;
-    color: #e8def5;
-    line-height: 1.75;
-    white-space: pre-line;
-    flex: 1;
-}
-
-/* === 章节封印 === */
+.sws-step strong { display: block; font-size: 13px; font-weight: 600; }
+.sws-step small { display: block; color: var(--alife-text-secondary); font-size: 12px; }
 .sws-section {
-    margin-top: 18px;
-    padding: 14px 16px 4px;
-    background: rgba(21,8,31,0.45);
-    border: 1px solid rgba(196,181,212,0.14);
-    border-radius: 10px;
-    position: relative;
-    transition: border-color 0.3s, box-shadow 0.3s;
-    overflow: hidden;
+    margin-top: 14px; padding: 18px; border: 1px solid var(--alife-border);
+    border-radius: var(--alife-radius-lg); background: var(--alife-bg-container);
+    box-shadow: var(--alife-shadow-card); min-width: 0;
 }
-/* 右上角晶洞装饰：conic-gradient 模拟晶体切面折射 */
-.sws-section::before {
-    content: '';
-    position: absolute;
-    top: 0; right: 0;
-    width: 48px; height: 48px;
-    background:
-        conic-gradient(
-            from 225deg at 100% 0%,
-            transparent 0deg,
-            rgba(212,175,55,0.18) 8deg, transparent 16deg,
-            rgba(255,94,138,0.14) 24deg, transparent 32deg,
-            rgba(196,181,212,0.12) 40deg, transparent 48deg,
-            rgba(212,175,55,0.10) 56deg, transparent 64deg,
-            rgba(255,94,138,0.08) 72deg, transparent 90deg
-        );
-    border-radius: 0 10px 0 0;
-    pointer-events: none;
-    animation: sws-sigil 90s linear infinite;
-    z-index: 0;
+.sws-section-heading { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+.sws-workspace .sws-section-title { font-size: 15px; font-weight: 650; line-height: 1.5; }
+.sws-section-caption { color: var(--alife-text-secondary); font-size: 12px; margin-top: 3px !important; }
+.sws-pill {
+    display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 999px;
+    background: var(--alife-bg-subtle); border: 1px solid var(--alife-border);
+    font-size: 11px; font-weight: 500; color: var(--alife-text-secondary); white-space: nowrap;
 }
-/* 左下角反向晶洞装饰 */
-.sws-section::after {
-    content: '';
-    position: absolute;
-    bottom: 0; left: 0;
-    width: 36px; height: 36px;
-    background:
-        conic-gradient(
-            from 45deg at 0% 100%,
-            transparent 0deg,
-            rgba(196,181,212,0.10) 8deg, transparent 16deg,
-            rgba(212,175,55,0.12) 24deg, transparent 32deg,
-            rgba(255,94,138,0.08) 40deg, transparent 48deg,
-            rgba(196,181,212,0.06) 56deg, transparent 64deg,
-            rgba(212,175,55,0.08) 72deg, transparent 90deg
-        );
-    border-radius: 0 0 0 10px;
-    pointer-events: none;
-    animation: sws-sigil 110s linear infinite reverse;
-    z-index: 0;
+.sws-pill-selected { background: var(--alife-primary-bg); border-color: var(--alife-primary-border); color: var(--alife-primary); }
+.sws-pill-warning { background: var(--alife-warning-bg); border-color: var(--alife-warning-border); color: var(--alife-text); }
+.sws-engine-grid, .sws-credentials-grid, .sws-fields-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 12px;
 }
-.sws-section:hover {
-    border-color: rgba(255,94,138,0.32);
-    box-shadow: 0 0 16px rgba(255,94,138,0.10);
+.sws-engine-card {
+    display: block; min-width: 0; padding: 15px; cursor: pointer;
+    background: var(--alife-bg-container); border: 1px solid var(--alife-border);
+    border-radius: var(--alife-radius); transition: border-color .16s, background .16s;
 }
-.sws-section > * { position: relative; z-index: 1; }
-.sws-section-title {
-    font-size: 14px;
-    font-weight: bold;
-    color: #ff8fb1;
-    margin: 0 0 12px;
-    padding-bottom: 7px;
-    border-bottom: 1px solid rgba(212,175,55,0.25);
-    display: flex;
-    align-items: center;
-    gap: 8px;
+.sws-engine-card:hover { border-color: var(--alife-primary-border); background: var(--alife-bg-hover); }
+.sws-engine-card.sws-engine-selected { border-color: var(--alife-primary); background: var(--alife-primary-bg); }
+.sws-engine-card:focus-within { outline: 2px solid var(--alife-primary); outline-offset: 2px; }
+.sws-engine-top { display: flex; align-items: center; flex-wrap: wrap; column-gap: 9px; row-gap: 5px; }
+.sws-engine-check, .sws-toggle-check { width: 17px; height: 17px; flex: 0 0 17px; accent-color: var(--alife-primary); cursor: pointer; margin: 0; }
+.sws-engine-name { font-size: 14px; font-weight: 650; }
+.sws-engine-category { margin-left: auto; color: var(--alife-text-secondary); font-size: 11px; }
+.sws-engine-description { display: block; margin: 7px 0 10px 26px !important; color: var(--alife-text-secondary); font-size: 12px; }
+.sws-engine-state { margin-left: 26px; max-width: calc(100% - 26px); white-space: normal; }
+.sws-notice {
+    display: flex; align-items: flex-start; gap: 9px; padding: 11px 13px; margin-top: 12px;
+    border-radius: var(--alife-radius-sm); border: 1px solid var(--alife-primary-border);
+    background: var(--alife-primary-bg); color: var(--alife-text-secondary); font-size: 12px;
 }
-.sws-section-icon {
-    color: #d4af37;
-    font-size: 15px;
-    text-shadow: 0 0 6px rgba(212,175,55,0.55);
+.sws-notice-warning { border-color: var(--alife-warning-border); background: var(--alife-warning-bg); color: var(--alife-text); }
+.sws-notice-symbol { flex: 0 0 auto; font-weight: 650; color: var(--alife-primary); }
+.sws-notice-warning .sws-notice-symbol { color: var(--alife-warning); }
+.sws-credentials {
+    padding: 15px; border-radius: var(--alife-radius); border: 1px solid var(--alife-border);
+    background: var(--alife-bg-subtle); min-width: 0;
 }
-
-/* === 状态徽标：圣光 orb === */
-.sws-badge {
-    display: inline-flex;
-    align-items: center;
-    font-size: 10px;
-    padding: 2px 9px;
-    border-radius: 12px;
-    margin-left: auto;
-    letter-spacing: 1px;
-    font-weight: bold;
+.sws-credentials-title { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; font-weight: 650; }
+.sws-link { color: var(--alife-primary); text-decoration: none; font-size: 12px; }
+.sws-link:hover { color: var(--alife-primary-hover); text-decoration: underline; }
+.sws-link:focus-visible, .sws-control:focus-visible { outline: 2px solid var(--alife-primary); outline-offset: 2px; }
+.sws-field { display: block; min-width: 0; margin-bottom: 12px; }
+.sws-field-label { display: block; margin-bottom: 5px; font-size: 12px; font-weight: 600; color: var(--alife-text); }
+.sws-control {
+    display: block; width: 100%; min-width: 0; min-height: 37px; padding: 8px 10px;
+    color: var(--alife-text); background: var(--alife-bg-container);
+    border: 1px solid var(--alife-border); border-radius: var(--alife-radius-sm);
+    font: inherit; font-size: 13px; transition: border-color .16s;
 }
-.sws-badge-on {
-    background: rgba(255,94,138,0.18);
-    color: #ff8fb1;
-    border: 1px solid rgba(255,94,138,0.55);
-    box-shadow: 0 0 10px rgba(255,94,138,0.4);
-    animation: sws-halo 3s ease-in-out infinite;
+.sws-control:hover, .sws-control:focus { border-color: var(--alife-primary); }
+.sws-control::placeholder { color: var(--alife-text-tertiary); }
+.sws-control[type='password'] { font-family: inherit; }
+.sws-control[type='number'] { font-variant-numeric: tabular-nums; }
+.sws-field-hint, .sws-helper { display: block; margin-top: 5px !important; color: var(--alife-text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.sws-helper + .sws-helper { margin-top: 8px !important; }
+.sws-helper strong { color: var(--alife-text); font-weight: 600; }
+.sws-toggle {
+    display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; min-width: 0; cursor: pointer;
 }
-.sws-badge-off {
-    background: rgba(107,74,122,0.18);
-    color: #6b4a7a;
-    border: 1px solid rgba(107,74,122,0.4);
-}
-
-/* === 字段 === */
-.sws-field { margin-bottom: 12px; }
-.sws-label {
-    font-size: 13px;
-    font-weight: bold;
-    color: #e8def5;
-    margin-bottom: 4px;
-}
-.sws-hint {
-    font-size: 11px;
-    color: #a8748a;
-    margin: 4px 0 10px 2px;
-    line-height: 1.65;
-    white-space: pre-line;
-}
-
-/* === AntDesign 覆盖（必须 !important） === */
-.sws-container .ant-input,
-.sws-container .ant-input-affix-wrapper {
-    background: rgba(21,8,31,0.6) !important;
-    border: 1px solid rgba(196,181,212,0.3) !important;
-    color: #fff5f1 !important;
-    border-radius: 6px !important;
-    font-size: 13px !important;
-}
-.sws-container .ant-input:hover,
-.sws-container .ant-input-affix-wrapper:hover {
-    border-color: rgba(255,94,138,0.6) !important;
-    box-shadow: 0 0 8px rgba(255,94,138,0.3) !important;
-}
-.sws-container .ant-input:focus,
-.sws-container .ant-input-focused,
-.sws-container .ant-input-affix-wrapper-focused {
-    border-color: #ff5e8a !important;
-    box-shadow: 0 0 12px rgba(255,94,138,0.5) !important;
-}
-.sws-container .ant-input::placeholder,
-.sws-container .ant-input-affix-wrapper input::placeholder {
-    color: rgba(168,116,138,0.5) !important;
-}
-.sws-container .ant-input-password-icon,
-.sws-container .anticon-eye,
-.sws-container .anticon-eye-invisible {
-    color: #a8748a !important;
-}
-.sws-container .ant-input-affix-wrapper .ant-input {
-    background: transparent !important;
-    border: none !important;
+.sws-toggle-check { margin-top: 3px; }
+.sws-toggle-title { display: block; color: var(--alife-text); font-weight: 600; font-size: 13px; }
+.sws-toggle-description { display: block; color: var(--alife-text-secondary); font-size: 12px; margin-top: 3px; }
+.sws-divider { height: 1px; background: var(--alife-border); margin: 14px 0; }
+.sws-disclosure { margin-top: 10px; min-width: 0; border: 1px solid var(--alife-border); border-radius: var(--alife-radius); overflow: hidden; }
+.sws-disclosure.sws-disclosure-compact { background: var(--alife-bg-container); }
+.sws-workspace .sws-disclosure-button.ant-btn {
+    display: block !important; width: 100% !important; height: auto !important;
+    min-height: 44px; padding: 12px 14px !important; text-align: left;
+    white-space: normal !important; border: 0 !important; border-radius: 0 !important;
+    color: var(--alife-text) !important; background: var(--alife-bg-subtle) !important;
     box-shadow: none !important;
 }
+.sws-workspace .sws-disclosure-button.ant-btn:hover { background: var(--alife-bg-hover) !important; }
+.sws-workspace .sws-disclosure-button.ant-btn:focus-visible { outline: 2px solid var(--alife-primary); outline-offset: -2px; }
+.sws-disclosure-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; }
+.sws-disclosure-label { font-weight: 600; font-size: 13px; }
+.sws-disclosure-action { flex-shrink: 0; color: var(--alife-primary); font-size: 12px; }
+.sws-disclosure-caption { display: block; color: var(--alife-text-secondary); font-size: 12px; margin-top: 3px; line-height: 1.6; }
+.sws-disclosure-content { padding: 14px; border-top: 1px solid var(--alife-border); }
+.sws-source-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 9px; margin: 5px 0 12px; }
+.sws-source-item { padding: 10px; background: var(--alife-bg-subtle); border: 1px solid var(--alife-border); border-radius: var(--alife-radius-sm); }
+.sws-source-item strong { display: block; font-size: 12px; font-weight: 600; }
+.sws-source-item span { color: var(--alife-text-secondary); font-size: 12px; }
+.sws-footer {
+    display: flex; align-items: flex-start; gap: 10px; padding: 14px 4px 2px;
+    color: var(--alife-text-secondary); font-size: 12px;
+}
+.sws-footer strong { color: var(--alife-text); font-weight: 600; }
+.sws-security { margin-top: 8px !important; color: var(--alife-text-tertiary); }
+@container (max-width: 580px) {
+    .sws-hero { padding: 17px; }
+    .sws-section { padding: 14px; }
+    .sws-workspace .sws-title { font-size: 18px; }
+    .sws-steps { grid-template-columns: 1fr; gap: 7px; }
+    .sws-step { padding: 9px 12px; }
+    .sws-step-number { width: 21px; height: 21px; flex-basis: 21px; font-size: 12px; }
+}
+@container (max-width: 380px) {
+    .sws-engine-category { width: calc(100% - 26px); margin-left: 26px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .sws-workspace * { transition: none !important; }
+}
+""";
 
-/* === 自定义 select（占星罗盘） === */
-.sws-select {
-    width: 100%;
-    padding: 7px 28px 7px 10px;
-    background: rgba(21,8,31,0.6);
-    border: 1px solid rgba(196,181,212,0.3);
-    color: #fff5f1;
-    border-radius: 6px;
-    font-size: 13px;
-    font-family: inherit;
-    outline: none;
-    cursor: pointer;
-    appearance: none;
-    -webkit-appearance: none;
-    background-image:
-        linear-gradient(45deg, transparent 50%, #d4af37 50%),
-        linear-gradient(135deg, #d4af37 50%, transparent 50%);
-    background-position: calc(100% - 14px) center, calc(100% - 9px) center;
-    background-size: 5px 5px, 5px 5px;
-    background-repeat: no-repeat;
-    transition: border-color 0.25s, box-shadow 0.25s;
-}
-.sws-select:hover {
-    border-color: rgba(255,94,138,0.6);
-    box-shadow: 0 0 8px rgba(255,94,138,0.3);
-}
-.sws-select:focus {
-    border-color: #ff5e8a;
-    box-shadow: 0 0 12px rgba(255,94,138,0.5);
-}
-.sws-select option {
-    background: #15081f;
-    color: #fff5f1;
-}
-
-/* === Toggle：月相封印 === */
-.sws-toggle {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 6px 0;
-}
-.sws-toggle input[type='checkbox'] {
-    appearance: none;
-    -webkit-appearance: none;
-    width: 38px;
-    height: 20px;
-    background: rgba(107,74,122,0.3);
-    border: 1px solid rgba(196,181,212,0.4);
-    border-radius: 10px;
-    cursor: pointer;
-    position: relative;
-    transition: all 0.3s;
-    outline: none;
-    flex-shrink: 0;
-}
-.sws-toggle input[type='checkbox']::before {
-    content: '☾';
-    position: absolute;
-    top: 1px; left: 2px;
-    width: 16px; height: 16px;
-    background: #c4b5d4;
-    color: #15081f;
-    border-radius: 50%;
-    font-size: 11px;
-    line-height: 16px;
-    text-align: center;
-    transition: all 0.3s;
-}
-.sws-toggle input[type='checkbox']:checked {
-    background: rgba(255,94,138,0.3);
-    border-color: #ff5e8a;
-    box-shadow: 0 0 8px rgba(255,94,138,0.5);
-}
-.sws-toggle input[type='checkbox']:checked::before {
-    content: '✦';
-    left: 18px;
-    background: #ff5e8a;
-    color: #fff5f1;
-    text-shadow: 0 0 4px rgba(255,255,255,0.6);
-}
-.sws-toggle-label {
-    font-size: 13px;
-    font-weight: bold;
-    color: #e8def5;
-}
-
-/* === 折叠封印 === */
-.sws-details {
-    margin: 8px 0;
-    border: 1px solid rgba(196,181,212,0.2);
-    border-radius: 6px;
-    background: rgba(21,8,31,0.35);
-    overflow: hidden;
-    transition: border-color 0.25s;
-}
-.sws-details:hover { border-color: rgba(255,94,138,0.3); }
-.sws-details summary {
-    cursor: pointer;
-    padding: 8px 12px;
-    font-size: 12px;
-    font-weight: bold;
-    color: #a8748a;
-    user-select: none;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    list-style: none;
-}
-.sws-details summary::-webkit-details-marker { display: none; }
-.sws-arrow {
-    display: inline-block;
-    color: #d4af37;
-    transition: transform 0.25s ease;
-    text-shadow: 0 0 6px rgba(212,175,55,0.5);
-    font-size: 11px;
-}
-.sws-details[open] .sws-arrow { transform: rotate(90deg); }
-.sws-details[open] summary {
-    border-bottom: 1px solid rgba(196,181,212,0.15);
-    color: #ff8fb1;
-}
-.sws-details-content { padding: 10px 12px 4px; }
-
-/* === 动画 === */
-@keyframes sws-halo {
-    0%, 100% { text-shadow: 0 0 12px rgba(255,94,138,0.5), 0 0 24px rgba(196,61,104,0.3); }
-    50%      { text-shadow: 0 0 18px rgba(255,94,138,0.8), 0 0 36px rgba(196,61,104,0.5); }
-}
-@keyframes sws-halo-gold {
-    0%, 100% {
-        text-shadow:
-            0 0 8px rgba(212,175,55,0.9),
-            0 0 16px rgba(212,175,55,0.5),
-            0 0 24px rgba(255,94,138,0.3);
-    }
-    50% {
-        text-shadow:
-            0 0 12px rgba(212,175,55,1.0),
-            0 0 24px rgba(212,175,55,0.7),
-            0 0 40px rgba(255,94,138,0.5);
-    }
-}
-@keyframes sws-float {
-    0%, 100% { transform: translateY(0); }
-    50%      { transform: translateY(-3px); }
-}
-/* 五芒星专用漂浮：用 top 不动 transform，避免覆盖 translateX(-50%) */
-@keyframes sws-orb-float {
-    0%, 100% { top: 0; }
-    50%      { top: -4px; }
-}
-@keyframes sws-sigil {
-    from { transform: rotate(0deg); }
-    to   { transform: rotate(360deg); }
-}
-";
+    readonly Dictionary<string, bool> disclosureStates = new(StringComparer.Ordinal);
 
     protected override void BuildRenderTree(RenderTreeBuilder b)
     {
@@ -462,313 +175,670 @@ public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSea
         b.AddContent(1, Css);
         b.CloseElement();
 
-        if (Configuration == null)
+        int sequence = 2;
+        b.OpenElement(sequence++, "div");
+        b.AddAttribute(sequence++, "class", "sws-workspace");
+        b.AddAttribute(sequence++, "data-sws-view", "search-workspace");
+
+        RenderHeader(b, ref sequence);
+        RenderSteps(b, ref sequence);
+
+        EngineCardInfo[] engines = CreateEngineCards();
+        List<string> pendingKeys = new();
+        int selectedCount = 0;
+        foreach (EngineCardInfo engine in engines)
         {
-            b.AddContent(2, "Configuration NULL");
-            return;
+            if (Configuration.IsEngineEnabled(engine.Id) == false) continue;
+            selectedCount++;
+            if (engine.Anonymous == false && engine.KeyCount == 0)
+                pendingKeys.Add(engine.Name);
         }
 
-        int i = 3;
-
-        b.OpenElement(i++, "div");
-        b.AddAttribute(i++, "class", "sws-container");
-
-        // === 头部圣徽 ===
-        b.OpenElement(i++, "div");
-        b.AddAttribute(i++, "class", "sws-header");
-        b.OpenElement(i++, "div");
-        b.AddAttribute(i++, "class", "sws-title");
-        b.AddContent(i++, "✦ 网络智能搜索 ✦");
-        b.CloseElement();
-        b.OpenElement(i++, "div");
-        b.AddAttribute(i++, "class", "sws-subtitle");
-        b.AddContent(i++, "☉ ☿ ♀ ♂ ♃ ♄ ☾");
-        b.CloseElement();
+        b.OpenElement(sequence++, "section");
+        b.AddAttribute(sequence++, "class", "sws-section");
+        RenderSectionHeader(b, ref sequence, "1. 选择搜索引擎",
+            "可以多选。AI 根据查询语言自动选择，失败时再尝试下一个；不是每次把所有引擎同时搜一遍。",
+            $"已选 {selectedCount} 个");
+        b.OpenElement(sequence++, "div");
+        b.AddAttribute(sequence++, "class", "sws-engine-grid");
+        b.AddAttribute(sequence++, "role", "group");
+        b.AddAttribute(sequence++, "aria-label", "选择一个或多个网页搜索引擎");
+        foreach (EngineCardInfo engine in engines)
+            RenderEngineCard(b, ref sequence, engine);
         b.CloseElement();
 
-        // === 引言卷轴 ===
-        b.OpenElement(i++, "div");
-        b.AddAttribute(i++, "class", "sws-intro");
-        b.OpenElement(i++, "div");
-        b.AddAttribute(i++, "class", "sws-intro-sigil");
-        b.AddContent(i++, "⛤");
+        if (selectedCount == 0)
+        {
+            AddNotice(b, ref sequence, "还没有选择网页搜索引擎。勾选上方任意一个即可开始配置；全部不选时，网页搜索不会发送请求。图片搜源仍可单独使用。", true);
+        }
+        else if (pendingKeys.Count > 0)
+        {
+            AddNotice(b, ref sequence, $"待填写 API Key：{string.Join("、", pendingKeys)}。这些引擎会暂时跳过；请在下方完成配置。状态只检查是否填写，不代表已通过连通性测试。", true);
+        }
+        else
+        {
+            AddNotice(b, ref sequence, "已勾选的引擎已具备调用条件；未勾选的引擎不会被调用，也不会向 AI 注入对应的工具说明。实际可用性以服务响应为准。");
+        }
         b.CloseElement();
-        b.OpenElement(i++, "div");
-        b.AddAttribute(i++, "class", "sws-intro-text");
-        b.AddContent(i++, "🜂 多功能AI搜索：AnySearch家族 + AI总结(高性能) + 智能搜索生成(标准) + 双引擎搜索 + 百度热搜 + 智能识图 + 图片出处搜索\n🜂 AnySearch 免Key即用：通用/垂直搜索、批量搜索、网页正文提取、垂直领域目录\n🜂 图片出处搜索（独立开关）：番剧截图→作品+集数+时间点；插画/同人本→画师+作品名+原图链接；通用图/游戏截图→网页出处(Yandex)\n🜂 每引擎支持 4 组 API Key（AnySearch 可留空走匿名），额度耗尽自动轮换\n🜂 修改配置后需重新加载模块（设置→插件→刷新）");
-        b.CloseElement();
-        b.CloseElement();
 
-        // === 引擎模式 ===
-        int tavilyCount = CountKeys(Configuration.TavilyApiKey1, Configuration.TavilyApiKey2, Configuration.TavilyApiKey3, Configuration.TavilyApiKey4);
-        int baiduCount = CountKeys(Configuration.BaiduApiKey1, Configuration.BaiduApiKey2, Configuration.BaiduApiKey3, Configuration.BaiduApiKey4);
-        int anysearchCount = CountKeys(Configuration.AnySearchApiKey);
-
-        RenderSection(b, ref i, "⚹", "引擎模式", null, () =>
+        b.OpenElement(sequence++, "section");
+        b.AddAttribute(sequence++, "class", "sws-section");
+        RenderSectionHeader(b, ref sequence, "2. 配置所选引擎",
+            "只显示你勾选的渠道。关闭渠道不会删除密钥，重新勾选后仍可继续使用。");
+        if (selectedCount == 0)
         {
-            AddSelectField(b, ref i, "搜索引擎模式", Configuration.Engine,
-                v => Configuration.Engine = v,
-                new[] {
-                    ("anysearch", "anysearch · 仅 AnySearch（免Key，默认）"),
-                    ("auto", "auto · 智能路由（多渠道同时开启时）"),
-                    ("tavily", "tavily · 仅 Tavily"),
-                    ("baidu", "baidu · 仅百度"),
-                });
-            AddHint(b, ref i, "单引擎模式只注入/启用该引擎的工具，其他引擎的工具不显示也不可调（省 token）；auto 多渠道时全部工具可用\n\nanysearch：仅 AnySearch（免Key，默认）\nauto：智能路由（多渠道同时开启时）\ntavily：仅 Tavily\nbaidu：仅百度");
-        });
-
-        // === AnySearch 配置 ===
-        RenderSection(b, ref i, "✧", "AnySearch 配置", anysearchCount, () =>
+            AddHelper(b, ref sequence, "先在上方选一个引擎，密钥设置就会出现在这里。");
+        }
+        else
         {
-            AddHint(b, ref i, "免Key匿名即可用（速率/配额较低），开箱即用；注册免费Key提额：https://anysearch.com/console/api-keys\nKey 格式 as_sk_xxx，认证方式 Bearer Token（留空走免Key匿名模式）\n\n能力：AnySearch(通用+垂直搜索, tag+params) / AnySearchBatchSearch(并行批量1-5查询) / ExtractWebpage(网页正文转Markdown) / GetSubDomains(垂直领域目录)");
-            AddPassword(b, ref i, "AnySearch API Key（可留空，走免Key匿名模式）", Configuration.AnySearchApiKey, v => Configuration.AnySearchApiKey = v);
-        });
-
-        // === Tavily 配置 ===
-        RenderSection(b, ref i, "✦", "Tavily 配置", tavilyCount, () =>
-        {
-            AddHint(b, ref i, "Tavily API Key 格式 tvly-xxxxx，在 https://app.tavily.com 免费注册（每月1000次额度）\n认证方式：Bearer Token");
-            AddPassword(b, ref i, "Tavily Key 1（主账号）", Configuration.TavilyApiKey1, v => Configuration.TavilyApiKey1 = v);
-            AddHint(b, ref i, "默认使用此账号，额度耗尽后自动切换到下一个");
-            AddCollapsibleGroup(b, ref i, "Tavily Key 2（备用）", () => AddPassword(b, ref i, "Tavily Key 2", Configuration.TavilyApiKey2 ?? "", v => Configuration.TavilyApiKey2 = v));
-            AddCollapsibleGroup(b, ref i, "Tavily Key 3（备用）", () => AddPassword(b, ref i, "Tavily Key 3", Configuration.TavilyApiKey3 ?? "", v => Configuration.TavilyApiKey3 = v));
-            AddCollapsibleGroup(b, ref i, "Tavily Key 4（备用）", () => AddPassword(b, ref i, "Tavily Key 4", Configuration.TavilyApiKey4 ?? "", v => Configuration.TavilyApiKey4 = v));
-        });
-
-        // === 百度配置 ===
-        RenderSection(b, ref i, "☾", "百度千帆 配置", baiduCount, () =>
-        {
-            AddHint(b, ref i, "百度千帆 API Key 创建地址：https://console.bce.baidu.com/qianfan/ais/console/apiKey\n可不开后付费、不实名，注册即可白嫖每日免费额度\n⚠️ 百度的后付费最好别开，否则可能导致欠款\n免费额度：AI总结/智能搜索 100次/天，普通搜索 50次/天，识图 100次/天，热搜 10次/天\n认证方式：Bearer Token");
-            AddPassword(b, ref i, "百度 Key 1（主账号）", Configuration.BaiduApiKey1, v => Configuration.BaiduApiKey1 = v);
-            AddHint(b, ref i, "默认使用此账号，额度耗尽后自动切换到下一个");
-            AddCollapsibleGroup(b, ref i, "百度 Key 2（备用）", () => AddPassword(b, ref i, "百度 Key 2", Configuration.BaiduApiKey2 ?? "", v => Configuration.BaiduApiKey2 = v));
-            AddCollapsibleGroup(b, ref i, "百度 Key 3（备用）", () => AddPassword(b, ref i, "百度 Key 3", Configuration.BaiduApiKey3 ?? "", v => Configuration.BaiduApiKey3 = v));
-            AddCollapsibleGroup(b, ref i, "百度 Key 4（备用）", () => AddPassword(b, ref i, "百度 Key 4", Configuration.BaiduApiKey4 ?? "", v => Configuration.BaiduApiKey4 = v));
-        });
-
-        // === 图片出处搜索 ===
-        int sourceKeyCount = CountKeys(Configuration.SauceNaoApiKey1, Configuration.SauceNaoApiKey2, Configuration.TraceMoeApiKey1, Configuration.TraceMoeApiKey2);
-        RenderSection(b, ref i, "✵", "图片出处搜索（以图搜源）", sourceKeyCount, () =>
-        {
-            AddToggle(b, ref i, "启用图片出处搜索（独立开关）", Configuration.EnableSourceSearch, v => Configuration.EnableSourceSearch = v);
-            AddHint(b, ref i, "以图搜源：插画/同人本/本子→画师名+作品名+原图链接(SauceNAO)；番剧/动画截图→作品名+集数+时间点(trace.moe)；游戏截图/照片/通用图→相似网页出处(Yandex)\n不传 engine = SauceNAO×Yandex 双引擎并行交叉验证（两边一致的作品/角色/画师信息更可靠），番剧图自动补查 trace.moe\nYandex 为网页接口（无官方API）：自动维护 cookie 会话 + 10秒最小间隔限流防验证码，仅支持图片URL方式\n关闭后 SearchSource 工具不再注入提示词（省 token），重新加载模块后生效");
-            AddHint(b, ref i, "SauceNAO 提供画师名/作品名等详细出处信息（插画/同人本/本子首选引擎）\n免Key也能用：自动走网页匿名模式（配额低：约4次/30秒、100次/天）\n免费注册提额（约200次/天，API更稳定）：https://saucenao.com 登录后在 user.php?page=search-api 获取 Key");
-            AddPassword(b, ref i, "SauceNAO API Key 1", Configuration.SauceNaoApiKey1, v => Configuration.SauceNaoApiKey1 = v);
-            AddCollapsibleGroup(b, ref i, "SauceNAO API Key 2（备用）", () => AddPassword(b, ref i, "SauceNAO API Key 2", Configuration.SauceNaoApiKey2 ?? "", v => Configuration.SauceNaoApiKey2 = v));
-            AddHint(b, ref i, "trace.moe 免Key匿名即可用（配额较低）；Token 可提额\n认证方式：x-trace-token 请求头");
-            AddPassword(b, ref i, "trace.moe Token 1（可留空走匿名）", Configuration.TraceMoeApiKey1, v => Configuration.TraceMoeApiKey1 = v);
-            AddCollapsibleGroup(b, ref i, "trace.moe Token 2（备用）", () => AddPassword(b, ref i, "trace.moe Token 2", Configuration.TraceMoeApiKey2 ?? "", v => Configuration.TraceMoeApiKey2 = v));
-        });
-
-        // === 搜索设置 ===
-        RenderSection(b, ref i, "◈", "搜索设置", null, () =>
-        {
-            AddInput(b, ref i, "默认返回结果数量", Configuration.MaxResults.ToString(), v =>
+            b.OpenElement(sequence++, "div");
+            b.AddAttribute(sequence++, "class", "sws-credentials-grid");
+            foreach (EngineCardInfo engine in engines)
             {
-                if (int.TryParse(v, out var n))
-                    Configuration.MaxResults = Math.Clamp(n, 1, 20);
-            });
-            AddHint(b, ref i, "每次搜索返回的网页结果条数，默认 5，范围 1~20。AI 调用时也可动态指定");
-            AddSelectField(b, ref i, "默认搜索深度", Configuration.SearchDepth, v => Configuration.SearchDepth = v,
-                new[] {
-                    ("basic", "basic · 快速（Tavily 1额度 / 百度 lite版）"),
-                    ("advanced", "advanced · 深度（Tavily 2额度 / 百度 standard版）"),
-                });
-            AddHint(b, ref i, "深度搜索更精准但更慢，消耗更多额度");
-        });
+                if (Configuration.IsEngineEnabled(engine.Id) == false) continue;
+                b.OpenElement(sequence++, "section");
+                b.SetKey(engine.Id);
+                b.AddAttribute(sequence++, "class", "sws-credentials");
+                b.AddAttribute(sequence++, "data-sws-credentials", engine.Id);
+                b.AddContent(sequence++, engine.Credentials);
+                b.CloseElement();
+            }
+            b.CloseElement();
+        }
+        b.CloseElement();
 
-        // === AI 搜索设置 ===
-        RenderSection(b, ref i, "⛤", "AI搜索设置", null, () =>
-        {
-            AddHint(b, ref i, "AI总结搜索(高性能版)和智能搜索生成(标准版)的模型配置\n高性能版：搜索+大模型总结一步到位，免费100次/日\n标准版：功能最全面，支持深度搜索、知识注入、追问");
-            AddInput(b, ref i, "高性能版模型", Configuration.SummaryModel, v => Configuration.SummaryModel = v);
-            AddHint(b, ref i, "auto_thinking(自动思考，推荐) / thinking / non_thinking");
-            AddInput(b, ref i, "智能搜索生成模型(标准版)", Configuration.ChatSearchModel, v => Configuration.ChatSearchModel = v);
-            AddHint(b, ref i, "ernie-4.5-turbo-32k(默认，百度自研免开通最稳) / deepseek-v4-flash / deepseek-v4-pro 等（DeepSeek 系列需账号在千帆开通对应模型，未开通会报 account_overdue；deepseek-v3.2、deepseek-r1 已停用，配置为旧名会自动回退到默认模型）");
-            AddToggle(b, ref i, "启用深度搜索（智能搜索生成）", Configuration.EnableDeepSearch, v => Configuration.EnableDeepSearch = v);
-            AddHint(b, ref i, "启用后智能搜索生成会更精准但更慢\n⚠️ 每次深度搜索会花费较多额度，请谨慎使用");
-        });
-
-        // === 缓存设置 ===
-        RenderSection(b, ref i, "⥁", "缓存设置", null, () =>
-        {
-            AddToggle(b, ref i, "启用搜索缓存", Configuration.EnableCache, v => Configuration.EnableCache = v);
-            AddHint(b, ref i, "启用后，相同查询在缓存有效期内不重复调用API，节省额度");
-            AddInput(b, ref i, "缓存过期时间（分钟）", Configuration.CacheTtlMinutes.ToString(), v =>
+        b.OpenElement(sequence++, "section");
+        b.AddAttribute(sequence++, "class", "sws-section");
+        RenderSectionHeader(b, ref sequence, "3. 日常搜索设置", "不确定怎么选？保留默认值就好。");
+        b.OpenElement(sequence++, "div");
+        b.AddAttribute(sequence++, "class", "sws-fields-grid");
+        AddSelectField(b, ref sequence, "返回多少条结果", Configuration.MaxResults.ToString(CultureInfo.InvariantCulture),
+            value =>
             {
-                if (int.TryParse(v, out var n))
-                    Configuration.CacheTtlMinutes = Math.Clamp(n, 1, 60);
-            });
-            AddHint(b, ref i, "缓存结果的保留时间，默认 5 分钟");
-        });
-
-        // === 注入设置 ===
-        RenderSection(b, ref i, "⇲", "注入设置", null, () =>
+                if (int.TryParse(value, out int count))
+                    Configuration.MaxResults = Math.Clamp(count, 1, 20);
+            },
+            new[] { ("5", "5 条 · 简洁（推荐）"), ("10", "10 条 · 更全面"), ("20", "20 条 · 更多参考") },
+            "各服务可能有自己的条数上限。更多结果会占用更多 AI 上下文。", "max-results");
+        if (Configuration.IsEngineEnabled("tavily") || Configuration.IsEngineEnabled("baidu"))
         {
-            AddToggle(b, ref i, "隐式注入（省 token）", Configuration.ImplicitInjection, v => Configuration.ImplicitInjection = v);
-            AddHint(b, ref i, "开启后函数文档不直接注入系统提示词，AI 需先调用 <smartwebsearch/> 按需加载（省 token，渐进式）；关闭则为显式注入（默认，功能说明直接可用）。改动需重载模块后生效");
-        });
+            AddSelectField(b, ref sequence, "搜索深度", Configuration.SearchDepth,
+                value => Configuration.SearchDepth = value,
+                new[] { ("basic", "快速搜索 · 日常够用（推荐）"), ("advanced", "深度搜索 · 更慢，可能消耗更多额度") },
+                "仅影响 Tavily 和百度网页搜索，不影响 DeepSeek。", "search-depth");
+        }
+        b.CloseElement();
+        AddHelper(b, ref sequence, "使用时直接对 AI 说：“帮我搜索最新消息，并附上来源链接。”不需要自己输入工具命令。");
+        b.CloseElement();
 
+        b.OpenElement(sequence++, "section");
+        b.AddAttribute(sequence++, "class", "sws-section");
+        RenderSectionHeader(b, ref sequence, "图片出处搜索", "独立于网页引擎选择，用图片找作品、画师或相关网页。", Configuration.EnableSourceSearch ? "已开启" : "已关闭");
+        AddToggle(b, ref sequence, "启用图片出处搜索", Configuration.EnableSourceSearch,
+            value => Configuration.EnableSourceSearch = value,
+            "关闭后不向 AI 提供图片搜源工具；已填写的密钥仍会保留。", "source-search");
+        RenderDisclosure(b, ref sequence, "source-settings", "图片搜源设置与说明",
+            "默认可以尝试匿名搜源；需要更多额度时再填写对应密钥。",
+            RenderSourceSettings);
+        b.CloseElement();
+
+        RenderDisclosure(b, ref sequence, "advanced-settings", "高级选项",
+            "缓存、AI 工具说明和百度 AI 搜索模型。默认设置适合大多数用户。",
+            RenderAdvancedSettings);
+
+        RenderFooter(b, ref sequence);
         b.CloseElement();
     }
 
-    // === 渲染辅助 ===
+    sealed record EngineCardInfo(
+        string Id, string Name, string Category, string Description,
+        int KeyCount, bool Anonymous, RenderFragment Credentials);
+
+    EngineCardInfo[] CreateEngineCards() =>
+    [
+        new("anysearch", "AnySearch", "可匿名尝试",
+            "通用与垂直检索，还支持批量搜索和网页正文提取。",
+            CountKeys(Configuration.AnySearchApiKey), true, RenderAnySearchCredentials),
+        new("tavily", "Tavily", "英文与 AI 摘要",
+            "面向 AI 的网页搜索，可获取内容摘要。需要 Tavily 密钥。",
+            CountKeys(Configuration.TavilyApiKey1, Configuration.TavilyApiKey2, Configuration.TavilyApiKey3, Configuration.TavilyApiKey4),
+            false, RenderTavilyCredentials),
+        new("baidu", "百度千帆", "中文与扩展功能",
+            "中文网页搜索，以及 AI 总结、热搜和识图。需要千帆密钥。",
+            CountKeys(Configuration.BaiduApiKey1, Configuration.BaiduApiKey2, Configuration.BaiduApiKey3, Configuration.BaiduApiKey4),
+            false, RenderBaiduCredentials),
+        new("deepseek", "DeepSeek", "搜索专用 API",
+            "返回带排序分数的网页结果和长摘要，可按需获取正文。",
+            CountKeys(Configuration.DeepSeekApiKey), false, RenderDeepSeekCredentials)
+    ];
+
+    void RenderHeader(RenderTreeBuilder b, ref int sequence)
+    {
+        b.OpenElement(sequence++, "header");
+        b.AddAttribute(sequence++, "class", "sws-hero");
+        b.OpenElement(sequence++, "div");
+        b.AddAttribute(sequence++, "class", "sws-hero-heading");
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", "sws-hero-icon");
+        b.AddAttribute(sequence++, "aria-hidden", "true");
+        b.AddContent(sequence++, "⌕");
+        b.CloseElement();
+        b.OpenElement(sequence++, "div");
+        b.OpenElement(sequence++, "h2");
+        b.AddAttribute(sequence++, "class", "sws-title");
+        b.AddContent(sequence++, "网络搜索工作台");
+        b.CloseElement();
+        b.OpenElement(sequence++, "p");
+        b.AddAttribute(sequence++, "class", "sws-subtitle");
+        b.AddContent(sequence++, "把实时信息交给 AI，把选择权留给你。");
+        b.CloseElement();
+        b.CloseElement();
+        b.CloseElement();
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", "sws-scope");
+        b.AddContent(sequence++, Character == null ? "当前：全局配置" : $"当前：{Character.Name} 的配置");
+        b.CloseElement();
+        b.CloseElement();
+    }
+
+    static void RenderSteps(RenderTreeBuilder b, ref int sequence)
+    {
+        b.OpenElement(sequence++, "div");
+        b.AddAttribute(sequence++, "class", "sws-steps");
+        AddStep(b, ref sequence, "1", "选择引擎", "勾选需要使用的渠道");
+        AddStep(b, ref sequence, "2", "填写密钥", "只配置所选渠道即可");
+        AddStep(b, ref sequence, "3", "保存并使用", "点页面下方的应用按钮");
+        b.CloseElement();
+    }
+
+    static void AddStep(RenderTreeBuilder b, ref int sequence, string number, string title, string description)
+    {
+        b.OpenElement(sequence++, "div");
+        b.AddAttribute(sequence++, "class", "sws-step");
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", "sws-step-number");
+        b.AddContent(sequence++, number);
+        b.CloseElement();
+        b.OpenElement(sequence++, "div");
+        b.OpenElement(sequence++, "strong");
+        b.AddContent(sequence++, title);
+        b.CloseElement();
+        b.OpenElement(sequence++, "small");
+        b.AddContent(sequence++, description);
+        b.CloseElement();
+        b.CloseElement();
+        b.CloseElement();
+    }
+
+    void RenderEngineCard(RenderTreeBuilder b, ref int sequence, EngineCardInfo engine)
+    {
+        bool selected = Configuration.IsEngineEnabled(engine.Id);
+        string status = selected
+            ? engine.KeyCount > 0 ? "已选 · 已填 Key" : engine.Anonymous ? "已选 · 可匿名尝试" : "已选 · 待填 Key"
+            : engine.KeyCount > 0 ? "未选 · 密钥已保留" : "未选择";
+        string statusClass = selected && engine.Anonymous == false && engine.KeyCount == 0
+            ? "sws-pill sws-pill-warning"
+            : selected ? "sws-pill sws-pill-selected" : "sws-pill";
+
+        b.OpenElement(sequence++, "label");
+        b.SetKey(engine.Id);
+        b.AddAttribute(sequence++, "class", selected ? "sws-engine-card sws-engine-selected" : "sws-engine-card");
+        b.AddAttribute(sequence++, "data-sws-engine", engine.Id);
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", "sws-engine-top");
+        b.OpenElement(sequence++, "input");
+        b.AddAttribute(sequence++, "class", "sws-engine-check");
+        b.AddAttribute(sequence++, "type", "checkbox");
+        b.AddAttribute(sequence++, "checked", selected);
+        b.AddAttribute(sequence++, "aria-label", $"使用 {engine.Name} 搜索引擎");
+        b.AddAttribute(sequence++, "onchange",
+            EventCallback.Factory.Create<ChangeEventArgs>(this,
+                e => Configuration.SetEngineEnabled(engine.Id, e.Value is true)));
+        b.SetUpdatesAttributeName("checked");
+        b.CloseElement();
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", "sws-engine-name");
+        b.AddContent(sequence++, engine.Name);
+        b.CloseElement();
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", "sws-engine-category");
+        b.AddContent(sequence++, engine.Category);
+        b.CloseElement();
+        b.CloseElement();
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", "sws-engine-description");
+        b.AddContent(sequence++, engine.Description);
+        b.CloseElement();
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", "sws-engine-state " + statusClass);
+        b.AddContent(sequence++, status);
+        b.CloseElement();
+        b.CloseElement();
+    }
+
+    void RenderAnySearchCredentials(RenderTreeBuilder b)
+    {
+        int sequence = 0;
+        AddCredentialHeading(b, ref sequence, "AnySearch", "获取密钥", "https://anysearch.com/console/api-keys");
+        AddInputField(b, ref sequence, "API Key（可留空）", Configuration.AnySearchApiKey,
+            value => Configuration.AnySearchApiKey = value, "password",
+            "留空尝试匿名模式；填写密钥后按账号额度使用。匿名渠道不保证始终可用。", "anysearch-key",
+            "可选，格式通常为 as_sk_…");
+        AddHelper(b, ref sequence, "支持通用/垂直检索、批量搜索、正文提取。对于重要事实，请让 AI 附上来源并核对原文。");
+    }
+
+    void RenderTavilyCredentials(RenderTreeBuilder b)
+    {
+        int sequence = 0;
+        AddCredentialHeading(b, ref sequence, "Tavily", "获取密钥", "https://app.tavily.com");
+        AddInputField(b, ref sequence, "API Key（主账号）", Configuration.TavilyApiKey1,
+            value => Configuration.TavilyApiKey1 = value, "password",
+            "已有备用账号也会参与轮换；以控制台显示的额度和计费为准。", "tavily-key-1", "粘贴 tvly-… 密钥");
+        RenderDisclosure(b, ref sequence, "tavily-backup", "备用账号",
+            $"已填 {CountKeys(Configuration.TavilyApiKey2, Configuration.TavilyApiKey3, Configuration.TavilyApiKey4)} / 3 · 可选，额度耗尽后自动轮换",
+            content =>
+            {
+                int index = 0;
+                AddInputField(content, ref index, "备用 Key 2", Configuration.TavilyApiKey2, value => Configuration.TavilyApiKey2 = value, "password", field: "tavily-key-2");
+                AddInputField(content, ref index, "备用 Key 3", Configuration.TavilyApiKey3, value => Configuration.TavilyApiKey3 = value, "password", field: "tavily-key-3");
+                AddInputField(content, ref index, "备用 Key 4", Configuration.TavilyApiKey4, value => Configuration.TavilyApiKey4 = value, "password", field: "tavily-key-4");
+            }, true);
+    }
+
+    void RenderBaiduCredentials(RenderTreeBuilder b)
+    {
+        int sequence = 0;
+        AddCredentialHeading(b, ref sequence, "百度千帆", "获取密钥", "https://console.bce.baidu.com/qianfan/ais/console/apiKey");
+        AddInputField(b, ref sequence, "千帆 API Key（主账号）", Configuration.BaiduApiKey1,
+            value => Configuration.BaiduApiKey1 = value, "password",
+            "使用千帆平台的 API Key，不是百度账号密码。请先检查账号额度与后付费设置。", "baidu-key-1", "粘贴千帆 API Key");
+        RenderDisclosure(b, ref sequence, "baidu-backup", "备用账号",
+            $"已填 {CountKeys(Configuration.BaiduApiKey2, Configuration.BaiduApiKey3, Configuration.BaiduApiKey4)} / 3 · 可选，额度耗尽后自动轮换",
+            content =>
+            {
+                int index = 0;
+                AddInputField(content, ref index, "备用 Key 2", Configuration.BaiduApiKey2, value => Configuration.BaiduApiKey2 = value, "password", field: "baidu-key-2");
+                AddInputField(content, ref index, "备用 Key 3", Configuration.BaiduApiKey3, value => Configuration.BaiduApiKey3 = value, "password", field: "baidu-key-3");
+                AddInputField(content, ref index, "备用 Key 4", Configuration.BaiduApiKey4, value => Configuration.BaiduApiKey4 = value, "password", field: "baidu-key-4");
+            }, true);
+    }
+
+    void RenderDeepSeekCredentials(RenderTreeBuilder b)
+    {
+        int sequence = 0;
+        AddCredentialHeading(b, ref sequence, "DeepSeek", "获取密钥", "https://platform.deepseek.com/api_keys");
+        AddInputField(b, ref sequence, "DeepSeek API Key", Configuration.DeepSeekApiKey,
+            value => Configuration.DeepSeekApiKey = value, "password",
+            "使用 DeepSeek 官方平台密钥，调用搜索专用 API；不需要填写聊天模型名。额度与费用以官方平台为准。", "deepseek-key", "粘贴 DeepSeek API Key");
+        AddToggle(b, ref sequence, "同时获取网页正文", Configuration.DeepSeekIncludeContent,
+            value => Configuration.DeepSeekIncludeContent = value,
+            "默认只读取搜索结果与长摘要，较简洁。开启后尝试获取正文，给 AI 更多参考，但返回内容更长。", "deepseek-content");
+        AddExternalLink(b, ref sequence, "查看搜索 API 官方文档 ↗", "https://api-docs.deepseek.com/zh-cn/api/search");
+    }
+
+    void RenderSourceSettings(RenderTreeBuilder b)
+    {
+        int sequence = 0;
+        b.OpenElement(sequence++, "div");
+        b.AddAttribute(sequence++, "class", "sws-source-grid");
+        AddSourceItem(b, ref sequence, "插画 / 漫画", "找画师、作品与原图：SauceNAO");
+        AddSourceItem(b, ref sequence, "番剧 / 动画截图", "找作品、集数与时间点：trace.moe");
+        AddSourceItem(b, ref sequence, "照片 / 游戏截图", "找相关网页：Yandex");
+        b.CloseElement();
+        AddHelper(b, ref sequence, "直接把图片发给 AI，问“这张图出自哪里？”即可。Yandex 使用网页接口且只支持图片 URL，可能遇到限流或验证码；结果需要核对来源。");
+        AddDivider(b, ref sequence);
+        b.OpenElement(sequence++, "div");
+        b.AddAttribute(sequence++, "class", "sws-fields-grid");
+        AddInputField(b, ref sequence, "SauceNAO API Key（可选）", Configuration.SauceNaoApiKey1,
+            value => Configuration.SauceNaoApiKey1 = value, "password",
+            "留空走网页匿名方式；填写后使用 JSON API。", "saucenao-key-1");
+        AddInputField(b, ref sequence, "trace.moe Token（可选）", Configuration.TraceMoeApiKey1,
+            value => Configuration.TraceMoeApiKey1 = value, "password",
+            "留空也可尝试匿名查询。", "tracemoe-key-1");
+        b.CloseElement();
+        RenderDisclosure(b, ref sequence, "source-backup", "图片搜源备用密钥", "可选，主账号不可用时参与轮换。",
+            content =>
+            {
+                int index = 0;
+                AddInputField(content, ref index, "SauceNAO 备用 Key 2", Configuration.SauceNaoApiKey2,
+                    value => Configuration.SauceNaoApiKey2 = value, "password", field: "saucenao-key-2");
+                AddInputField(content, ref index, "trace.moe 备用 Token 2", Configuration.TraceMoeApiKey2,
+                    value => Configuration.TraceMoeApiKey2 = value, "password", field: "tracemoe-key-2");
+            }, true);
+        b.OpenElement(sequence++, "p");
+        b.AddAttribute(sequence++, "class", "sws-helper");
+        AddExternalLink(b, ref sequence, "SauceNAO 密钥页面 ↗", "https://saucenao.com/user.php?page=search-api");
+        b.AddContent(sequence++, "　");
+        AddExternalLink(b, ref sequence, "trace.moe 官网 ↗", "https://trace.moe");
+        b.CloseElement();
+    }
+
+    void RenderAdvancedSettings(RenderTreeBuilder b)
+    {
+        int sequence = 0;
+        AddToggle(b, ref sequence, "缓存重复搜索", Configuration.EnableCache,
+            value => Configuration.EnableCache = value,
+            "相同查询在有效期内直接复用结果，节省请求。需要追踪即时变化时，可关闭缓存。", "enable-cache");
+        AddInputField(b, ref sequence, "缓存保留时间（分钟）", Configuration.CacheTtlMinutes.ToString(CultureInfo.InvariantCulture),
+            value =>
+            {
+                if (int.TryParse(value, out int minutes))
+                    Configuration.CacheTtlMinutes = Math.Clamp(minutes, 1, 60);
+            }, "number", "默认 5 分钟，范围 1–60 分钟。", "cache-minutes", minimum: 1, maximum: 60);
+        AddDivider(b, ref sequence);
+        AddToggle(b, ref sequence, "按需加载 AI 工具说明（省上下文）", Configuration.ImplicitInjection,
+            value => Configuration.ImplicitInjection = value,
+            "开启后 AI 先调用 <SmartWebSearch/> 再读取具体工具说明；关闭时直接提供所选渠道的说明。改动后需重新激活角色。", "implicit-injection");
+        if (Configuration.IsEngineEnabled("baidu") == false)
+            return;
+        RenderDisclosure(b, ref sequence, "baidu-ai-settings", "百度 AI 搜索模型", "仅对百度千帆的 AI 总结与智能搜索生成生效，不是 DeepSeek 搜索 API 设置。",
+            content =>
+            {
+                int index = 0;
+                AddSelectField(content, ref index, "高性能版思考模式", Configuration.SummaryModel,
+                    value => Configuration.SummaryModel = value,
+                    new[] { ("auto_thinking", "自动判断（推荐）"), ("thinking", "启用思考"), ("non_thinking", "不启用思考") },
+                    "保留默认即可；实际模型可用性以百度账号为准。", "summary-model");
+                AddInputField(content, ref index, "智能搜索生成模型（标准版）", Configuration.ChatSearchModel,
+                    value => Configuration.ChatSearchModel = value, "text",
+                    "默认 ernie-4.5-turbo-32k。使用千帆提供的 DeepSeek 模型需在千帆账号开通；与上面的 DeepSeek 官方 API Key 互不通用。", "chat-search-model");
+                AddToggle(content, ref index, "标准版启用深度搜索", Configuration.EnableDeepSearch,
+                    value => Configuration.EnableDeepSearch = value,
+                    "更精细，但可能更慢且消耗更多额度；日常使用建议关闭。", "baidu-deep-search");
+            }, true);
+    }
+
+    void RenderFooter(RenderTreeBuilder b, ref int sequence)
+    {
+        b.OpenElement(sequence++, "footer");
+        b.AddAttribute(sequence++, "class", "sws-footer");
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "aria-hidden", "true");
+        b.AddContent(sequence++, "✓");
+        b.CloseElement();
+        b.OpenElement(sequence++, "div");
+        b.OpenElement(sequence++, "p");
+        b.OpenElement(sequence++, "strong");
+        b.AddContent(sequence++, "别忘了保存：");
+        b.CloseElement();
+        b.AddContent(sequence++, Character == null
+            ? "点击页面下方“应用到全局”，未设置独立配置的角色将使用此配置。"
+            : "只给当前角色使用，点“应用到角色”；想作为默认设置，点“应用到全局”。");
+        b.CloseElement();
+        b.OpenElement(sequence++, "p");
+        b.AddContent(sequence++, "修改引擎选择、图片搜源开关或工具说明加载方式后，请重新激活使用该配置的角色，让 AI 工具列表同步更新。");
+        b.CloseElement();
+        b.OpenElement(sequence++, "p");
+        b.AddAttribute(sequence++, "class", "sws-security");
+        b.AddContent(sequence++, "密钥会保存在 Alife 的本地配置文件中。不要把密钥、配置文件或含密钥的截图公开分享。");
+        b.CloseElement();
+        b.CloseElement();
+        b.CloseElement();
+    }
+
+    // 各分区独立闭合，RenderFragment 的序号与父层隔离，减少条件渲染对输入状态的影响。
+    static void RenderSectionHeader(RenderTreeBuilder b, ref int sequence, string title, string caption, string? pill = null)
+    {
+        b.OpenElement(sequence++, "div");
+        b.AddAttribute(sequence++, "class", "sws-section-heading");
+        b.OpenElement(sequence++, "div");
+        b.OpenElement(sequence++, "h3");
+        b.AddAttribute(sequence++, "class", "sws-section-title");
+        b.AddContent(sequence++, title);
+        b.CloseElement();
+        b.OpenElement(sequence++, "p");
+        b.AddAttribute(sequence++, "class", "sws-section-caption");
+        b.AddContent(sequence++, caption);
+        b.CloseElement();
+        b.CloseElement();
+        if (string.IsNullOrEmpty(pill) == false)
+        {
+            b.OpenElement(sequence++, "span");
+            b.AddAttribute(sequence++, "class", "sws-pill");
+            b.AddContent(sequence++, pill);
+            b.CloseElement();
+        }
+        b.CloseElement();
+    }
+
+    void RenderDisclosure(RenderTreeBuilder b, ref int sequence, string key, string title,
+        string caption, RenderFragment content, bool compact = false)
+    {
+        bool expanded = disclosureStates.TryGetValue(key, out bool current) && current;
+        b.OpenElement(sequence++, "section");
+        b.AddAttribute(sequence++, "class", compact ? "sws-disclosure sws-disclosure-compact" : "sws-disclosure");
+        b.AddAttribute(sequence++, "data-sws-disclosure", key);
+        b.OpenComponent<Button>(sequence++);
+        b.AddAttribute(sequence++, "Class", "sws-disclosure-button");
+        b.AddAttribute(sequence++, "Type", ButtonType.Text);
+        b.AddAttribute(sequence++, "HtmlType", "button");
+        b.AddAttribute(sequence++, "NoSpanWrap", true);
+        b.AddAttribute(sequence++, "AriaLabel", $"{title}，{(expanded ? "收起" : "展开")}");
+        b.AddAttribute(sequence++, "OnClick",
+            EventCallback.Factory.Create<MouseEventArgs>(this, _ => ToggleDisclosure(key)));
+        b.AddAttribute(sequence++, "ChildContent", (RenderFragment)(heading =>
+        {
+            int index = 0;
+            heading.OpenElement(index++, "span");
+            heading.AddAttribute(index++, "class", "sws-disclosure-line");
+            heading.OpenElement(index++, "span");
+            heading.AddAttribute(index++, "class", "sws-disclosure-label");
+            heading.AddContent(index++, title);
+            heading.CloseElement();
+            heading.OpenElement(index++, "span");
+            heading.AddAttribute(index++, "class", "sws-disclosure-action");
+            heading.AddContent(index++, expanded ? "收起 −" : "展开 +");
+            heading.CloseElement();
+            heading.CloseElement();
+            heading.OpenElement(index++, "span");
+            heading.AddAttribute(index++, "class", "sws-disclosure-caption");
+            heading.AddContent(index++, caption);
+            heading.CloseElement();
+        }));
+        b.CloseComponent();
+        if (expanded)
+        {
+            b.OpenElement(sequence++, "div");
+            b.AddAttribute(sequence++, "class", "sws-disclosure-content");
+            b.AddContent(sequence++, content);
+            b.CloseElement();
+        }
+        b.CloseElement();
+    }
+
+    void ToggleDisclosure(string key)
+    {
+        bool expanded = disclosureStates.TryGetValue(key, out bool current) && current;
+        disclosureStates[key] = !expanded;
+    }
 
     static int CountKeys(params string?[] keys)
     {
-        int n = 0;
-        foreach (var k in keys) if (!string.IsNullOrWhiteSpace(k)) n++;
-        return n;
+        int count = 0;
+        foreach (string? key in keys)
+            if (string.IsNullOrWhiteSpace(key) == false) count++;
+        return count;
     }
 
-    void RenderSection(RenderTreeBuilder b, ref int seq, string icon, string title,
-        int? badgeCount, Action renderContent)
+    static void AddCredentialHeading(RenderTreeBuilder b, ref int sequence, string name, string linkText, string linkUrl)
     {
-        b.OpenElement(seq++, "div");
-        b.AddAttribute(seq++, "class", "sws-section");
-
-        b.OpenElement(seq++, "div");
-        b.AddAttribute(seq++, "class", "sws-section-title");
-
-        b.OpenElement(seq++, "span");
-        b.AddAttribute(seq++, "class", "sws-section-icon");
-        b.AddContent(seq++, icon);
+        b.OpenElement(sequence++, "div");
+        b.AddAttribute(sequence++, "class", "sws-credentials-title");
+        b.OpenElement(sequence++, "span");
+        b.AddContent(sequence++, name);
         b.CloseElement();
+        AddExternalLink(b, ref sequence, linkText + " ↗", linkUrl);
+        b.CloseElement();
+    }
 
-        b.AddContent(seq++, title);
-
-        if (badgeCount.HasValue)
+    void AddInputField(RenderTreeBuilder b, ref int sequence, string label, string? value, Action<string> setter,
+        string type = "text", string? hint = null, string? field = null, string? placeholder = null,
+        int? minimum = null, int? maximum = null)
+    {
+        b.OpenElement(sequence++, "label");
+        b.AddAttribute(sequence++, "class", "sws-field");
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", "sws-field-label");
+        b.AddContent(sequence++, label);
+        b.CloseElement();
+        b.OpenElement(sequence++, "input");
+        b.AddAttribute(sequence++, "class", "sws-control");
+        b.AddAttribute(sequence++, "type", type);
+        b.AddAttribute(sequence++, "value", value ?? "");
+        b.AddAttribute(sequence++, "data-sws-field", field);
+        b.AddAttribute(sequence++, "aria-label", label);
+        if (string.IsNullOrEmpty(placeholder) == false)
+            b.AddAttribute(sequence++, "placeholder", placeholder);
+        if (type == "password")
         {
-            b.OpenElement(seq++, "span");
-            b.AddAttribute(seq++, "class", badgeCount.Value > 0 ? "sws-badge sws-badge-on" : "sws-badge sws-badge-off");
-            b.AddContent(seq++, badgeCount.Value > 0
-                ? $"已启用 {badgeCount.Value}/4"
-                : "未配置");
-            b.CloseElement();
+            b.AddAttribute(sequence++, "autocomplete", "off");
+            b.AddAttribute(sequence++, "spellcheck", "false");
         }
-
+        if (minimum.HasValue) b.AddAttribute(sequence++, "min", minimum.Value);
+        if (maximum.HasValue) b.AddAttribute(sequence++, "max", maximum.Value);
+        b.AddAttribute(sequence++, "oninput",
+            EventCallback.Factory.Create<ChangeEventArgs>(this, e => setter(e.Value?.ToString() ?? "")));
+        b.SetUpdatesAttributeName("value");
         b.CloseElement();
-
-        renderContent();
-        b.CloseElement();
-    }
-
-    void AddSelectField(RenderTreeBuilder b, ref int seq, string label, string value,
-        Action<string> setter, (string val, string text)[] options)
-    {
-        b.OpenElement(seq++, "div");
-        b.AddAttribute(seq++, "class", "sws-field");
-
-        b.OpenElement(seq++, "div");
-        b.AddAttribute(seq++, "class", "sws-label");
-        b.AddContent(seq++, label);
-        b.CloseElement();
-
-        b.OpenElement(seq++, "select");
-        b.AddAttribute(seq++, "class", "sws-select");
-        b.AddAttribute(seq++, "value", value);
-        b.AddAttribute(seq++, "onchange",
-            EventCallback.Factory.Create<ChangeEventArgs>(this, e =>
-                setter(e.Value?.ToString() ?? "")));
-
-        foreach (var (val, text) in options)
+        if (string.IsNullOrEmpty(hint) == false)
         {
-            b.OpenElement(seq++, "option");
-            b.AddAttribute(seq++, "value", val);
-            if (val == value) b.AddAttribute(seq++, "selected", true);
-            b.AddContent(seq++, text);
+            b.OpenElement(sequence++, "span");
+            b.AddAttribute(sequence++, "class", "sws-field-hint");
+            b.AddContent(sequence++, hint);
             b.CloseElement();
         }
         b.CloseElement();
+    }
 
+    void AddSelectField(RenderTreeBuilder b, ref int sequence, string label, string? value,
+        Action<string> setter, (string Value, string Text)[] options, string? hint = null, string? field = null)
+    {
+        b.OpenElement(sequence++, "label");
+        b.AddAttribute(sequence++, "class", "sws-field");
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", "sws-field-label");
+        b.AddContent(sequence++, label);
+        b.CloseElement();
+        b.OpenElement(sequence++, "select");
+        b.AddAttribute(sequence++, "class", "sws-control");
+        b.AddAttribute(sequence++, "value", value);
+        b.AddAttribute(sequence++, "aria-label", label);
+        b.AddAttribute(sequence++, "data-sws-field", field);
+        b.AddAttribute(sequence++, "onchange",
+            EventCallback.Factory.Create<ChangeEventArgs>(this, e => setter(e.Value?.ToString() ?? "")));
+        b.SetUpdatesAttributeName("value");
+        bool hasCurrentOption = false;
+        foreach ((string optionValue, string text) in options)
+        {
+            bool selected = string.Equals(optionValue, value, StringComparison.Ordinal);
+            hasCurrentOption |= selected;
+            b.OpenElement(sequence++, "option");
+            b.AddAttribute(sequence++, "value", optionValue);
+            b.AddAttribute(sequence++, "selected", selected);
+            b.AddContent(sequence++, text);
+            b.CloseElement();
+        }
+        if (hasCurrentOption == false && string.IsNullOrWhiteSpace(value) == false)
+        {
+            b.OpenElement(sequence++, "option");
+            b.AddAttribute(sequence++, "value", value);
+            b.AddAttribute(sequence++, "selected", true);
+            b.AddContent(sequence++, $"已有设置：{value}");
+            b.CloseElement();
+        }
+        b.CloseElement();
+        if (string.IsNullOrEmpty(hint) == false)
+        {
+            b.OpenElement(sequence++, "span");
+            b.AddAttribute(sequence++, "class", "sws-field-hint");
+            b.AddContent(sequence++, hint);
+            b.CloseElement();
+        }
         b.CloseElement();
     }
 
-    void AddInput(RenderTreeBuilder b, ref int seq, string label, string value, Action<string> setter)
+    void AddToggle(RenderTreeBuilder b, ref int sequence, string title, bool value, Action<bool> setter,
+        string description, string field)
     {
-        b.OpenElement(seq++, "div");
-        b.AddAttribute(seq++, "class", "sws-field");
-
-        b.OpenElement(seq++, "div");
-        b.AddAttribute(seq++, "class", "sws-label");
-        b.AddContent(seq++, label);
+        b.OpenElement(sequence++, "label");
+        b.AddAttribute(sequence++, "class", "sws-toggle");
+        b.OpenElement(sequence++, "input");
+        b.AddAttribute(sequence++, "class", "sws-toggle-check");
+        b.AddAttribute(sequence++, "type", "checkbox");
+        b.AddAttribute(sequence++, "checked", value);
+        b.AddAttribute(sequence++, "aria-label", title);
+        b.AddAttribute(sequence++, "data-sws-field", field);
+        b.AddAttribute(sequence++, "onchange",
+            EventCallback.Factory.Create<ChangeEventArgs>(this, e => setter(e.Value is true)));
+        b.SetUpdatesAttributeName("checked");
         b.CloseElement();
-
-        b.OpenComponent<Input<string>>(seq++);
-        b.AddAttribute(seq++, "Value", value);
-        b.AddAttribute(seq++, "ValueChanged",
-            EventCallback.Factory.Create<string>(this, setter));
-        b.CloseComponent();
-
+        b.OpenElement(sequence++, "span");
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", "sws-toggle-title");
+        b.AddContent(sequence++, title);
+        b.CloseElement();
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", "sws-toggle-description");
+        b.AddContent(sequence++, description);
+        b.CloseElement();
+        b.CloseElement();
         b.CloseElement();
     }
 
-    void AddPassword(RenderTreeBuilder b, ref int seq, string label, string value, Action<string> setter)
+    static void AddNotice(RenderTreeBuilder b, ref int sequence, string text, bool warning = false)
     {
-        b.OpenElement(seq++, "div");
-        b.AddAttribute(seq++, "class", "sws-field");
-
-        b.OpenElement(seq++, "div");
-        b.AddAttribute(seq++, "class", "sws-label");
-        b.AddContent(seq++, label);
+        b.OpenElement(sequence++, "div");
+        b.AddAttribute(sequence++, "class", warning ? "sws-notice sws-notice-warning" : "sws-notice");
+        b.AddAttribute(sequence++, "role", "status");
+        b.AddAttribute(sequence++, "aria-live", "polite");
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", "sws-notice-symbol");
+        b.AddAttribute(sequence++, "aria-hidden", "true");
+        b.AddContent(sequence++, warning ? "!" : "i");
         b.CloseElement();
-
-        b.OpenComponent<InputPassword>(seq++);
-        b.AddAttribute(seq++, "Value", value);
-        b.AddAttribute(seq++, "ValueChanged",
-            EventCallback.Factory.Create<string>(this, setter));
-        b.CloseComponent();
-
+        b.OpenElement(sequence++, "span");
+        b.AddContent(sequence++, text);
+        b.CloseElement();
         b.CloseElement();
     }
 
-    void AddToggle(RenderTreeBuilder b, ref int seq, string label, bool value, Action<bool> setter)
+    static void AddHelper(RenderTreeBuilder b, ref int sequence, string text)
     {
-        b.OpenElement(seq++, "div");
-        b.AddAttribute(seq++, "class", "sws-toggle");
-
-        b.OpenElement(seq++, "input");
-        b.AddAttribute(seq++, "type", "checkbox");
-        b.AddAttribute(seq++, "checked", value);
-        b.AddAttribute(seq++, "onchange",
-            EventCallback.Factory.Create<ChangeEventArgs>(this, e =>
-                setter(e.Value is true)));
-        b.CloseElement();
-
-        b.OpenElement(seq++, "span");
-        b.AddAttribute(seq++, "class", "sws-toggle-label");
-        b.AddContent(seq++, label);
-        b.CloseElement();
-
+        b.OpenElement(sequence++, "p");
+        b.AddAttribute(sequence++, "class", "sws-helper");
+        b.AddContent(sequence++, text);
         b.CloseElement();
     }
 
-    void AddHint(RenderTreeBuilder b, ref int seq, string text)
+    static void AddExternalLink(RenderTreeBuilder b, ref int sequence, string text, string url)
     {
-        b.OpenElement(seq++, "div");
-        b.AddAttribute(seq++, "class", "sws-hint");
-        b.AddContent(seq++, text);
+        b.OpenElement(sequence++, "a");
+        b.AddAttribute(sequence++, "class", "sws-link");
+        b.AddAttribute(sequence++, "href", url);
+        b.AddAttribute(sequence++, "target", "_blank");
+        b.AddAttribute(sequence++, "rel", "noopener noreferrer");
+        b.AddContent(sequence++, text);
         b.CloseElement();
     }
 
-    void AddCollapsibleGroup(RenderTreeBuilder b, ref int seq, string title, Action renderContent)
+    static void AddDivider(RenderTreeBuilder b, ref int sequence)
     {
-        b.OpenElement(seq++, "details");
-        b.AddAttribute(seq++, "class", "sws-details");
-
-        b.OpenElement(seq++, "summary");
-        b.OpenElement(seq++, "span");
-        b.AddAttribute(seq++, "class", "sws-arrow");
-        b.AddContent(seq++, "▶");
+        b.OpenElement(sequence++, "div");
+        b.AddAttribute(sequence++, "class", "sws-divider");
+        b.AddAttribute(sequence++, "aria-hidden", "true");
         b.CloseElement();
-        b.AddContent(seq++, " " + title);
-        b.CloseElement();
+    }
 
-        b.OpenElement(seq++, "div");
-        b.AddAttribute(seq++, "class", "sws-details-content");
-        renderContent();
+    static void AddSourceItem(RenderTreeBuilder b, ref int sequence, string title, string description)
+    {
+        b.OpenElement(sequence++, "div");
+        b.AddAttribute(sequence++, "class", "sws-source-item");
+        b.OpenElement(sequence++, "strong");
+        b.AddContent(sequence++, title);
         b.CloseElement();
-
+        b.OpenElement(sequence++, "span");
+        b.AddContent(sequence++, description);
+        b.CloseElement();
         b.CloseElement();
     }
 }
