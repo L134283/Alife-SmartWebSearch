@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Threading.Tasks;
 using Alife.Framework;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Rendering;
@@ -70,6 +71,34 @@ public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSea
 }
 .sws-pill-selected { background: var(--alife-primary-bg); border-color: var(--alife-primary-border); color: var(--alife-primary); }
 .sws-pill-warning { background: var(--alife-warning-bg); border-color: var(--alife-warning-border); color: var(--alife-text); }
+.sws-model-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 8px; }
+.sws-model-refresh {
+    cursor: pointer; font: inherit; font-size: 12px; padding: 4px 12px;
+    border: 1px solid var(--alife-primary-border); border-radius: 999px;
+    background: var(--alife-primary-bg); color: var(--alife-primary);
+}
+.sws-model-refresh:disabled { cursor: default; opacity: .6; }
+.sws-model-chip {
+    cursor: pointer; font: inherit; font-size: 11px; padding: 3px 10px;
+    border: 1px solid var(--alife-border); border-radius: 999px;
+    background: var(--alife-bg-subtle); color: var(--alife-text-secondary);
+    white-space: nowrap;
+}
+.sws-model-chip:hover { border-color: var(--alife-primary-border); color: var(--alife-primary); }
+.sws-model-chip-selected { background: var(--alife-primary-bg); border-color: var(--alife-primary-border); color: var(--alife-primary); }
+.sws-model-status { font-size: 11px; color: var(--alife-text-secondary); }
+.sws-tool-heading { margin: 20px 0 8px; font-size: 12px; font-weight: 650; color: var(--alife-text-secondary); }
+.sws-tool-item {
+    display: grid; grid-template-columns: auto 1fr; gap: 2px 8px;
+    padding: 7px 10px; margin-bottom: 6px; cursor: pointer;
+    border: 1px solid var(--alife-border); border-radius: var(--alife-radius);
+    background: var(--alife-bg-container);
+}
+.sws-tool-item:hover { border-color: var(--alife-primary-border); }
+.sws-tool-check { margin: 3px 0 0; }
+.sws-tool-text { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-weight: 500; }
+.sws-tool-title { font-size: 13px; }
+.sws-tool-hint { grid-column: 2; color: var(--alife-text-secondary); font-size: 11px; line-height: 1.55; }
 .sws-engine-grid, .sws-credentials-grid, .sws-fields-grid {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 12px;
 }
@@ -169,6 +198,11 @@ public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSea
 
     readonly Dictionary<string, bool> disclosureStates = new(StringComparer.Ordinal);
 
+    // 「拉取可用模型」按钮的状态：列表只来自 /v2/models，不写进配置
+    readonly List<SmartWebSearch.BaiduChatModel> chatModels = new();
+    bool chatModelsLoading;
+    string? chatModelsStatus;
+
     protected override void BuildRenderTree(RenderTreeBuilder b)
     {
         b.OpenElement(0, "style");
@@ -219,6 +253,7 @@ public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSea
         {
             AddNotice(b, ref sequence, "已勾选的引擎已具备调用条件；未勾选的引擎不会被调用，也不会向 AI 注入对应的工具说明。实际可用性以服务响应为准。");
         }
+        AddHelper(b, ref sequence, "完全免费：AnySearch（免 Key）、Tavily（每月约 1000 次）、百度普通搜索 / AI总结 / 热搜 / 识图（每日额度）、图片搜源。要花钱：DeepSeek 搜索（无免费额度）、百度「智能搜索生成」（模型 tokens 按量计费）。");
         b.CloseElement();
 
         b.OpenElement(sequence++, "section");
@@ -292,24 +327,36 @@ public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSea
 
     sealed record EngineCardInfo(
         string Id, string Name, string Category, string Description,
-        int KeyCount, bool Anonymous, RenderFragment Credentials);
+        int KeyCount, bool Anonymous, RenderFragment Credentials, bool Paid = false);
 
     EngineCardInfo[] CreateEngineCards() =>
     [
         new("anysearch", "AnySearch", "可匿名尝试",
-            "通用与垂直检索，还支持批量搜索和网页正文提取。",
+            "免 Key 即可匿名使用（额度较低）。通用与垂直检索，还支持批量搜索和网页正文提取。",
             CountKeys(Configuration.AnySearchApiKey), true, RenderAnySearchCredentials),
         new("tavily", "Tavily", "英文与 AI 摘要",
-            "面向 AI 的网页搜索，可获取内容摘要。需要 Tavily 密钥。",
+            "面向 AI 的网页搜索，每月约 1000 次免费额度。需要 Tavily 密钥。",
             CountKeys(Configuration.TavilyApiKey1, Configuration.TavilyApiKey2, Configuration.TavilyApiKey3, Configuration.TavilyApiKey4),
             false, RenderTavilyCredentials),
         new("baidu", "百度千帆", "中文与扩展功能",
-            "中文网页搜索，以及 AI 总结、热搜和识图。需要千帆密钥。",
+            "网页搜索、AI 总结、热搜、识图，各有每日免费额度（标准版模型除外）。可只勾选要用的功能。",
             CountKeys(Configuration.BaiduApiKey1, Configuration.BaiduApiKey2, Configuration.BaiduApiKey3, Configuration.BaiduApiKey4),
             false, RenderBaiduCredentials),
         new("deepseek", "DeepSeek", "搜索专用 API",
-            "返回带排序分数的网页结果和长摘要，可按需获取正文。",
-            CountKeys(Configuration.DeepSeekApiKey), false, RenderDeepSeekCredentials)
+            "无免费额度、按搜索请求计费。返回带排序分数的网页结果和长摘要，可按需获取正文。",
+            CountKeys(Configuration.DeepSeekApiKey), false, RenderDeepSeekCredentials, true)
+    ];
+
+    sealed record BaiduToolInfo(string Id, string Title, string Hint, string Badge, bool Paid);
+
+    // 百度各功能单独开关：不勾选就不注册工具、不注入说明，AI 也看不到
+    static readonly BaiduToolInfo[] BaiduToolInfos =
+    [
+        new("search", "普通网页搜索", "中文网页结果，可带图片/视频。每月约 1500 次免费（约 50 次/天）。", "免费额度", false),
+        new("summary", "AI 总结（高性能版）", "搜索 + 大模型总结一步到位，费用已含模型。每天 100 次免费，超出 0.06 元/次。", "每天100次", false),
+        new("chatsearch", "智能搜索生成（标准版）", "支持深度搜索、知识注入、追问。搜索部分每天 100 次免费，但大模型 tokens 需另外付费。", "模型要钱", true),
+        new("trending", "百度热搜", "9 个分类热榜，约 10 次/天免费。", "免费额度", false),
+        new("imagerecognition", "智能识图", "传入图片 URL 识别内容，约 100 次/天免费。", "免费额度", false)
     ];
 
     void RenderHeader(RenderTreeBuilder b, ref int sequence)
@@ -373,10 +420,12 @@ public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSea
     void RenderEngineCard(RenderTreeBuilder b, ref int sequence, EngineCardInfo engine)
     {
         bool selected = Configuration.IsEngineEnabled(engine.Id);
+        bool noTools = engine.Id == "baidu" && Configuration.GetBaiduTools().Count == 0;
         string status = selected
-            ? engine.KeyCount > 0 ? "已选 · 已填 Key" : engine.Anonymous ? "已选 · 可匿名尝试" : "已选 · 待填 Key"
+            ? noTools ? "已选 · 未勾功能"
+            : engine.KeyCount > 0 ? "已选 · 已填 Key" : engine.Anonymous ? "已选 · 可匿名尝试" : "已选 · 待填 Key"
             : engine.KeyCount > 0 ? "未选 · 密钥已保留" : "未选择";
-        string statusClass = selected && engine.Anonymous == false && engine.KeyCount == 0
+        string statusClass = selected && (noTools || (engine.Anonymous == false && engine.KeyCount == 0))
             ? "sws-pill sws-pill-warning"
             : selected ? "sws-pill sws-pill-selected" : "sws-pill";
 
@@ -404,6 +453,13 @@ public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSea
         b.AddAttribute(sequence++, "class", "sws-engine-category");
         b.AddContent(sequence++, engine.Category);
         b.CloseElement();
+        if (engine.Paid)
+        {
+            b.OpenElement(sequence++, "span");
+            b.AddAttribute(sequence++, "class", "sws-pill sws-pill-warning");
+            b.AddContent(sequence++, "需付费");
+            b.CloseElement();
+        }
         b.CloseElement();
         b.OpenElement(sequence++, "span");
         b.AddAttribute(sequence++, "class", "sws-engine-description");
@@ -449,6 +505,7 @@ public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSea
     {
         int sequence = 0;
         AddCredentialHeading(b, ref sequence, "百度千帆", "获取密钥", "https://console.bce.baidu.com/qianfan/ais/console/apiKey");
+        AddHelper(b, ref sequence, "百度一套 Key 就够，功能在这里分开勾选；没勾的功能不会出现在 AI 的工具里。");
         AddInputField(b, ref sequence, "千帆 API Key（主账号）", Configuration.BaiduApiKey1,
             value => Configuration.BaiduApiKey1 = value, "password",
             "使用千帆平台的 API Key，不是百度账号密码。请先检查账号额度与后付费设置。", "baidu-key-1", "粘贴千帆 API Key");
@@ -461,6 +518,14 @@ public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSea
                 AddInputField(content, ref index, "备用 Key 3", Configuration.BaiduApiKey3, value => Configuration.BaiduApiKey3 = value, "password", field: "baidu-key-3");
                 AddInputField(content, ref index, "备用 Key 4", Configuration.BaiduApiKey4, value => Configuration.BaiduApiKey4 = value, "password", field: "baidu-key-4");
             }, true);
+
+        b.OpenElement(sequence++, "div");
+        b.AddAttribute(sequence++, "class", "sws-tool-heading");
+        b.AddContent(sequence++, $"百度功能（已勾 {Configuration.GetBaiduTools().Count} / {BaiduToolInfos.Length}，不勾就不交给 AI）");
+        b.CloseElement();
+        foreach (BaiduToolInfo tool in BaiduToolInfos)
+            AddToolCheckbox(b, ref sequence, tool);
+        AddHelper(b, ref sequence, "只想白嫖：勾「普通网页搜索」「AI 总结」「热搜」「识图」，这四个都有免费额度；「智能搜索生成」的搜索免费，但模型要按 tokens 付费。改动后记得重新激活角色。");
     }
 
     void RenderDeepSeekCredentials(RenderTreeBuilder b)
@@ -541,12 +606,124 @@ public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSea
                     "保留默认即可；实际模型可用性以百度账号为准。", "summary-model");
                 AddInputField(content, ref index, "智能搜索生成模型（标准版）", Configuration.ChatSearchModel,
                     value => Configuration.ChatSearchModel = value, "text",
-                    "默认 ernie-4.5-turbo-32k。使用千帆提供的 DeepSeek 模型需在千帆账号开通；与上面的 DeepSeek 官方 API Key 互不通用。", "chat-search-model");
+                    "默认 ernie-5.5-flash-preview（当前在售文心里单价最低）。模型会随百度调整下线，点下面的按钮可直接读取账号当前可用的模型。", "chat-search-model");
+                RenderChatModelPicker(content, ref index);
                 AddToggle(content, ref index, "标准版启用深度搜索", Configuration.EnableDeepSearch,
                     value => Configuration.EnableDeepSearch = value,
                     "更精细，但可能更慢且消耗更多额度；日常使用建议关闭。", "baidu-deep-search");
             }, true);
     }
+
+    /// <summary>
+    /// 模型选择：一个「拉取可用模型」按钮 + 拉回来的模型标签，点标签即写入配置。
+    /// 列表来自千帆 GET /v2/models（按账号实际可用模型返回），不写进配置文件。
+    /// </summary>
+    void RenderChatModelPicker(RenderTreeBuilder b, ref int sequence)
+    {
+        b.OpenElement(sequence++, "div");
+        b.AddAttribute(sequence++, "class", "sws-model-tools");
+        b.OpenElement(sequence++, "button");
+        b.AddAttribute(sequence++, "class", "sws-model-refresh");
+        b.AddAttribute(sequence++, "type", "button");
+        b.AddAttribute(sequence++, "data-sws-field", "chat-model-refresh");
+        b.AddAttribute(sequence++, "disabled", chatModelsLoading);
+        b.AddAttribute(sequence++, "onclick",
+            EventCallback.Factory.Create<MouseEventArgs>(this, _ => RefreshChatModelsAsync()));
+        b.AddContent(sequence++, chatModelsLoading ? "正在拉取…" : "拉取可用模型");
+        b.CloseElement();
+        if (string.IsNullOrEmpty(chatModelsStatus) == false)
+        {
+            b.OpenElement(sequence++, "span");
+            b.AddAttribute(sequence++, "class", "sws-model-status");
+            b.AddContent(sequence++, chatModelsStatus);
+            b.CloseElement();
+        }
+        b.CloseElement();
+
+        if (chatModels.Count == 0)
+        {
+            if (SmartWebSearch.IsLegacyChatModel(Configuration.ChatSearchModel))
+                AddHelper(b, ref sequence, "当前填写的模型已被百度下线，插件会自动改用可用模型；建议点上面的按钮重新选择。");
+            return;
+        }
+
+        b.OpenElement(sequence++, "div");
+        b.AddAttribute(sequence++, "class", "sws-model-tools");
+        foreach (SmartWebSearch.BaiduChatModel model in chatModels)
+        {
+            bool selected = string.Equals(model.Id, Configuration.ChatSearchModel?.Trim(), StringComparison.OrdinalIgnoreCase);
+            b.OpenElement(sequence++, "button");
+            b.AddAttribute(sequence++, "type", "button");
+            b.AddAttribute(sequence++, "class", selected ? "sws-model-chip sws-model-chip-selected" : "sws-model-chip");
+            b.AddAttribute(sequence++, "data-sws-model", model.Id);
+            b.AddAttribute(sequence++, "title", $"{model.Name} · {ModelStatusText(model.Status)}{ModelPriceText(model)}");
+            b.AddAttribute(sequence++, "onclick",
+                EventCallback.Factory.Create<MouseEventArgs>(this, _ => SelectChatModel(model.Id)));
+            b.AddContent(sequence++, model.Id);
+            b.CloseElement();
+        }
+        b.CloseElement();
+    }
+
+    void SelectChatModel(string id)
+    {
+        Configuration.ChatSearchModel = id;
+        chatModelsStatus = $"已选择 {id}，记得点页面下方按钮保存。";
+    }
+
+    async Task RefreshChatModelsAsync()
+    {
+        if (chatModelsLoading) return;
+
+        string? key = null;
+        foreach (string? candidate in new[] { Configuration.BaiduApiKey1, Configuration.BaiduApiKey2, Configuration.BaiduApiKey3, Configuration.BaiduApiKey4 })
+        {
+            if (string.IsNullOrWhiteSpace(candidate) == false) { key = candidate.Trim(); break; }
+        }
+        if (key == null)
+        {
+            chatModelsStatus = "请先在「百度千帆」里填写 API Key。";
+            return;
+        }
+
+        chatModelsLoading = true;
+        chatModelsStatus = "正在向百度千帆读取当前账号的可用模型…";
+        try
+        {
+            (List<SmartWebSearch.BaiduChatModel> models, string? error) =
+                await SmartWebSearch.FetchBaiduChatModelsAsync(key, refresh: true);
+            chatModels.Clear();
+            chatModels.AddRange(models);
+            chatModelsStatus = error ?? $"已读取 {models.Count} 个可用模型（{DateTime.Now:HH:mm}），点击即可切换。";
+
+            if (error == null)
+            {
+                string current = (Configuration.ChatSearchModel ?? "").Trim();
+                bool found = false;
+                foreach (SmartWebSearch.BaiduChatModel model in models)
+                    if (string.Equals(model.Id, current, StringComparison.OrdinalIgnoreCase)) { found = true; break; }
+                if (found == false)
+                    chatModelsStatus += $" 当前填写的「{(current.Length > 0 ? current : "（空）")}」不在列表里，选择下面的模型即可替换。";
+            }
+        }
+        finally
+        {
+            chatModelsLoading = false;
+        }
+    }
+
+    static string ModelStatusText(string status) => status switch
+    {
+        "active" => "在售",
+        "new" => "新上线",
+        "soon_offline" => "即将下线",
+        _ => status,
+    };
+
+    static string ModelPriceText(SmartWebSearch.BaiduChatModel model) =>
+        model.InputPrice > 0
+            ? $" · 输入 {model.InputPrice:0.####} / 输出 {model.OutputPrice:0.####} 元每千tokens"
+            : "";
 
     void RenderFooter(RenderTreeBuilder b, ref int sequence)
     {
@@ -754,6 +931,40 @@ public partial class SmartWebSearchUI : ModuleUIBase<SmartWebSearch, SmartWebSea
             b.AddContent(sequence++, hint);
             b.CloseElement();
         }
+        b.CloseElement();
+    }
+
+    void AddToolCheckbox(RenderTreeBuilder b, ref int sequence, BaiduToolInfo tool)
+    {
+        bool enabled = Configuration.IsBaiduToolEnabled(tool.Id);
+        b.OpenElement(sequence++, "label");
+        b.AddAttribute(sequence++, "class", "sws-tool-item");
+        b.AddAttribute(sequence++, "data-sws-tool", tool.Id);
+        b.OpenElement(sequence++, "input");
+        b.AddAttribute(sequence++, "class", "sws-tool-check");
+        b.AddAttribute(sequence++, "type", "checkbox");
+        b.AddAttribute(sequence++, "checked", enabled);
+        b.AddAttribute(sequence++, "aria-label", $"启用百度 {tool.Title}");
+        b.AddAttribute(sequence++, "onchange",
+            EventCallback.Factory.Create<ChangeEventArgs>(this,
+                e => Configuration.SetBaiduToolEnabled(tool.Id, e.Value is true)));
+        b.SetUpdatesAttributeName("checked");
+        b.CloseElement();
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", "sws-tool-text");
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", "sws-tool-title");
+        b.AddContent(sequence++, tool.Title);
+        b.CloseElement();
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", tool.Paid ? "sws-pill sws-pill-warning" : "sws-pill");
+        b.AddContent(sequence++, tool.Badge);
+        b.CloseElement();
+        b.CloseElement();
+        b.OpenElement(sequence++, "span");
+        b.AddAttribute(sequence++, "class", "sws-tool-hint");
+        b.AddContent(sequence++, tool.Hint);
+        b.CloseElement();
         b.CloseElement();
     }
 

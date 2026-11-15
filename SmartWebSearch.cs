@@ -60,6 +60,8 @@ public partial class SmartWebSearch(
     private const string BaiduChatUrl = "https://qianfan.baidubce.com/v2/ai_search/chat/completions";
     private const string BaiduTrendingUrl = "https://qianfan.baidubce.com/v2/tools/baidu_trending";
     private const string BaiduImageRecognitionUrl = "https://qianfan.baidubce.com/v2/tools/image_general";
+    // 千帆模型列表（API Key 鉴权，返回当前账号可用的模型与价格）
+    private const string BaiduModelsUrl = "https://qianfan.baidubce.com/v2/models";
     private const string AnySearchUrl = "https://api.anysearch.com/v1/search";
     private const string AnySearchExtractUrl = "https://api.anysearch.com/v1/extract";
     private const string AnySearchSubDomainsUrl = "https://api.anysearch.com/v1/sub-domains";
@@ -110,16 +112,18 @@ public partial class SmartWebSearch(
             return Task.CompletedTask;
 
         SmartWebSearchConfig cfg = Configuration;
-        IReadOnlyList<string> enabledEngines = cfg.GetEnabledEngines();
+        IReadOnlyList<string> enabledEngines = cfg.GetEffectiveEngines();
+        bool baiduSearch = cfg.IsEngineEnabled("baidu") && cfg.IsBaiduToolEnabled("search");
+        bool hasWebSearch = enabledEngines.Any(id => string.Equals(id, "baidu", StringComparison.Ordinal) == false) || baiduSearch;
         string engineDesc = enabledEngines.Count == 0
             ? "网页搜索已关闭"
             : string.Join("、", enabledEngines.Select(EngineDisplayName));
         string searchRule = enabledEngines.Count == 0
             ? "- 用户关闭了所有网页搜索引擎，不调用网页搜索、热搜或识图，也不要声称已经联网核实。"
-            : "- 用户要求搜索/知识可能过时/需最新信息或事实核查时，先搜索再回答。";
-        string cascade = cfg.IsEngineEnabled("baidu")
-            ? "需要综合答案时 SmartSummary → SmartChatSearch → Search；普通关键词或指定引擎时用 Search"
-            : enabledEngines.Count > 0 ? "普通网页搜索用 Search" : "没有可用的网页搜索工具";
+            : hasWebSearch
+                ? "- 用户要求搜索/知识可能过时/需最新信息或事实核查时，先搜索再回答。"
+                : "- 用户没有开启普通网页搜索，只在需要热搜、识图或 AI 总结时调用对应工具，不要假装已经联网核实。";
+        string cascade = BuildCascade(cfg, hasWebSearch);
 
         // 常时注入的硬规则：不依赖函数文档，AI 任何时候都需要（搜索时机、工具级联、引擎路由）。
         // 函数能力说明由 [Description] 自动注入，不再重复。
@@ -140,18 +144,33 @@ public partial class SmartWebSearch(
             Log("出处搜索已启用：SearchSource（SauceNAO × Yandex 交叉验证 + trace.moe）");
         }
 
+        // 百度只勾了 AI 总结/热搜/识图等、没留普通搜索时不参与 Search 路由，明确告诉 AI 别走百度
+        if (cfg.IsEngineEnabled("baidu") && baiduSearch == false)
+            hardRules += "\n" + """
+                - 百度未启用普通网页搜索，Search 不要路由到百度，只用已启用的其他引擎。
+                """;
+
         // 详细规则：与函数使用细节相关，按引擎动态精简，只提当前引擎能力。
         // 显式模式直接注入；隐式模式放进 handler.Explanation 随文档一并加载，省 token。
         List<string> rules = new();
         if (cfg.IsEngineEnabled("anysearch"))
             rules.Add("- AnySearch 可免Key使用；垂直搜先 GetSubDomains 查 tag+params，批量1-5查询用 AnySearchBatchSearch，网页正文提取用 ExtractWebpage。");
         if (cfg.IsEngineEnabled("baidu"))
-            rules.Add("- 百度中文强，可带图片/视频；SmartSummary 搜索并总结，SmartChatSearch 支持深度搜索及追问。");
+        {
+            var baiduParts = new List<string>();
+            if (baiduSearch) baiduParts.Add("普通网页搜索(可带图片/视频)");
+            if (cfg.IsBaiduToolEnabled("summary")) baiduParts.Add("SmartSummary 搜索并总结");
+            if (cfg.IsBaiduToolEnabled("chatsearch")) baiduParts.Add("SmartChatSearch 支持深度搜索及追问");
+            if (cfg.IsBaiduToolEnabled("trending")) baiduParts.Add("HotSearch 查热搜榜");
+            if (cfg.IsBaiduToolEnabled("imagerecognition")) baiduParts.Add("ImageRecognition 识别图片内容");
+            if (baiduParts.Count > 0)
+                rules.Add($"- 百度中文强：{string.Join("；", baiduParts)}。");
+        }
         if (cfg.IsEngineEnabled("tavily"))
             rules.Add("- Tavily 自带 AI 摘要，英文结果强。");
         if (cfg.IsEngineEnabled("deepseek"))
             rules.Add("- DeepSeek 是独立的付费网页搜索，不是聊天接口；DeepSeekSearch 支持 site:、-site:、精确短语、lang:、after:、before:，关键词限128字符，需要长正文时再启用 includeContent。");
-        if (cfg.IsEngineEnabled("tavily") || cfg.IsEngineEnabled("baidu"))
+        if (cfg.IsEngineEnabled("tavily") || baiduSearch)
             rules.Add("- advanced/deep_search 更准但更慢更费额度，非必要不主动加深。");
         string detailedRules = string.Join("\n", rules);
 
@@ -170,6 +189,27 @@ public partial class SmartWebSearch(
     }
 
     /// <summary>
+    /// 工具级联文案：只列用户实际勾选的百度工具，未勾选的不出现在提示词里。
+    /// </summary>
+    static string BuildCascade(SmartWebSearchConfig cfg, bool hasWebSearch)
+    {
+        List<string> chain = new();
+        if (cfg.IsEngineEnabled("baidu"))
+        {
+            if (cfg.IsBaiduToolEnabled("summary")) chain.Add("SmartSummary");
+            if (cfg.IsBaiduToolEnabled("chatsearch")) chain.Add("SmartChatSearch");
+        }
+        if (hasWebSearch) chain.Add("Search");
+
+        if (chain.Count == 0) return "没有可用的网页搜索工具";
+        if (chain.Count == 1)
+            return chain[0] == "Search" ? "普通网页搜索用 Search" : $"需要总结或问答时用 {chain[0]}";
+        if (chain.Contains("Search"))
+            return $"需要综合答案时 {string.Join(" → ", chain)}；普通关键词或指定引擎时用 Search";
+        return $"需要综合答案时 {string.Join(" → ", chain)}";
+    }
+
+    /// <summary>
     /// 4.0：DocumentMode 控制函数文档的注入方式。
     /// 显式（默认）：完整函数文档直接注入系统提示词，AI 开箱即用；
     /// 隐式：只暴露触发标签 &lt;SmartWebSearch/&gt;，AI 需先调用它按需加载文档（省 token，渐进式）。
@@ -180,7 +220,7 @@ public partial class SmartWebSearch(
         // 按引擎配置过滤：单独开启某引擎时，其他引擎的工具不注入文档也不注册调用，节省 token
         var exposed = FilterFunctionsByEngine(discovered.Functions, cfg);
         // 单引擎模式下裁剪 Search 函数文档：只保留当前引擎相关参数，避免向 AI 暴露不可用的引擎路由/专属参数
-        exposed = TrimSearchForEngines(exposed, cfg.GetEnabledEngines());
+        exposed = TrimSearchForEngines(exposed, GetSearchEngines(cfg));
 
         var documentMode = cfg.ImplicitInjection
             ? DocumentMode.Implicit
@@ -192,7 +232,7 @@ public partial class SmartWebSearch(
             Explanation = explanation,
             Functions = exposed,
         };
-        Log($"引擎[{string.Join(",", cfg.GetEnabledEngines())}]：注入 {exposed.Count}/{discovered.Functions.Count} 个工具");
+        Log($"引擎[{string.Join(",", cfg.GetEffectiveEngines())}]：注入 {exposed.Count}/{discovered.Functions.Count} 个工具");
         if (cfg.ImplicitInjection)
             Log($"隐式注入已开启：AI 需先调用 <{HandlerName}/> 按需加载函数文档");
         functionService.RegisterHandler(handler, documentMode, cancellationToken: DestroyCancellationToken);
@@ -210,7 +250,7 @@ public partial class SmartWebSearch(
 
     static string HandlerDescription(SmartWebSearchConfig cfg)
     {
-        List<string> capabilities = cfg.GetEnabledEngines().Select(EngineDisplayName).ToList();
+        List<string> capabilities = cfg.GetEffectiveEngines().Select(EngineDisplayName).ToList();
         if (cfg.EnableSourceSearch)
             capabilities.Add("图片出处搜索");
         return capabilities.Count == 0 ? "网络搜索已关闭。" : $"网络智能搜索：{string.Join("、", capabilities)}。";
@@ -285,17 +325,27 @@ public partial class SmartWebSearch(
     /// 按引擎配置过滤工具：单独开启某引擎时，其他引擎的工具不注入文档也不注册调用，节省 token。
     /// 函数名一律 nameof(方法名) 绑定（XmlHandler 用方法名当标签名，插件不擅自改名），比较忽略大小写。
     /// 按勾选组合取各引擎工具的并集；Tavily 仅使用 Search，DeepSeek 另有专用工具。
+    /// 百度再按工具细分：未勾选的功能既不注册也不注入说明；百度工具全不勾视为未启用。
     /// SearchSource（图片出处搜索）为独立功能，不依赖上述引擎，各模式下按独立开关注入。
     /// </summary>
     static List<XmlFunction> FilterFunctionsByEngine(List<XmlFunction> all, SmartWebSearchConfig cfg)
     {
+        bool baiduSearch = cfg.IsEngineEnabled("baidu") && cfg.IsBaiduToolEnabled("search");
+        bool hasWebSearch = cfg.GetEffectiveEngines()
+            .Any(id => string.Equals(id, "baidu", StringComparison.Ordinal) == false) || baiduSearch;
+
         HashSet<string> names = new(StringComparer.OrdinalIgnoreCase);
-        if (cfg.GetEnabledEngines().Count > 0)
+        if (hasWebSearch)
             names.Add(nameof(Search));
         if (cfg.IsEngineEnabled("anysearch"))
             names.UnionWith(new[] { nameof(AnySearch), nameof(AnySearchBatchSearch), nameof(ExtractWebpage), nameof(GetSubDomains) });
         if (cfg.IsEngineEnabled("baidu"))
-            names.UnionWith(new[] { nameof(SmartSummary), nameof(SmartChatSearch), nameof(HotSearch), nameof(ImageRecognition) });
+        {
+            if (cfg.IsBaiduToolEnabled("summary")) names.Add(nameof(SmartSummary));
+            if (cfg.IsBaiduToolEnabled("chatsearch")) names.Add(nameof(SmartChatSearch));
+            if (cfg.IsBaiduToolEnabled("trending")) names.Add(nameof(HotSearch));
+            if (cfg.IsBaiduToolEnabled("imagerecognition")) names.Add(nameof(ImageRecognition));
+        }
         if (cfg.IsEngineEnabled("deepseek"))
             names.Add(nameof(DeepSeekSearch));
         if (cfg.EnableSourceSearch)
@@ -333,9 +383,9 @@ public partial class SmartWebSearch(
         if (string.IsNullOrWhiteSpace(query)) { interactor.Poke("搜索关键词不能为空"); return; }
 
         SmartWebSearchConfig cfg = Configuration;
-        IReadOnlyList<string> enabledEngines = cfg.GetEnabledEngines();
+        IReadOnlyList<string> enabledEngines = GetSearchEngines(cfg);
         if (enabledEngines.Count == 0)
-        { interactor.Poke("网页搜索已关闭，请先在插件设置中勾选至少一个引擎"); return; }
+        { interactor.Poke("网页搜索已关闭：请在插件设置中勾选至少一个搜索引擎（百度还需勾选「普通搜索」）"); return; }
 
         string? requestedEngine = string.IsNullOrWhiteSpace(engine) ? null : engine.Trim().ToLowerInvariant();
         if (requestedEngine == "auto")
@@ -999,21 +1049,164 @@ public partial class SmartWebSearch(
 
     #region 智能搜索生成（标准版）
 
-    // 标准版默认模型：百度自研、与搜索服务同源，最稳（DeepSeek 系列需账号在千帆开通，未开通会报 account_overdue）
-    const string DefaultChatSearchModel = "ernie-4.5-turbo-32k";
+    // 标准版默认模型：百度 2026-11 下架 ernie-4.5-turbo-32k 后，当前在售对话模型里单价最低的是 5.5 Flash。
+    // 模型被下线时按 ChatModelFallbacks 顺序自动兜底，设置里也能点「拉取可用模型」实时刷新。
+    const string DefaultChatSearchModel = "ernie-5.5-flash-preview";
 
-    // 已停用的旧模型名 → 当前默认模型（百度已停用 deepseek-v3.2 / deepseek-r1 等旧模型，返回 invalid_model/account_overdue）
+    // 备选顺序：上一个报 invalid_model（已下线）或 account_overdue（未开通）时依次尝试
+    static readonly string[] ChatModelFallbacks =
+    {
+        DefaultChatSearchModel,
+        "ernie-5.1",
+        "ernie-light-dt-1.0",
+        "deepseek-v4-flash-0731",
+        "deepseek-v4-pro",
+    };
+
+    // 已下线/改名的模型 → 现役模型（用户旧配置里存的是旧名时先本地改写，省掉一次必然失败的请求）
     static readonly Dictionary<string, string> LegacyChatModels = new(StringComparer.OrdinalIgnoreCase)
     {
+        ["ernie-4.5-turbo-32k"] = DefaultChatSearchModel,
+        ["ernie-4.5-turbo-128k"] = DefaultChatSearchModel,
+        ["ernie-4.5-turbo-vl"] = DefaultChatSearchModel,
+        ["ernie-x1-turbo-32k"] = DefaultChatSearchModel,
+        ["deepseek-v3"] = DefaultChatSearchModel,
+        ["deepseek-v3.1"] = DefaultChatSearchModel,
         ["deepseek-v3.2"] = DefaultChatSearchModel,
         ["deepseek-r1"] = DefaultChatSearchModel,
+        ["deepseek-r1-250528"] = DefaultChatSearchModel,
+        ["deepseek-v4-flash"] = "deepseek-v4-flash-0731",
     };
+
+    public static bool IsLegacyChatModel(string? model) =>
+        !string.IsNullOrWhiteSpace(model) && LegacyChatModels.ContainsKey(model.Trim());
+
+    /// <summary>千帆模型条目（只保留智能搜索生成可用的对话模型）。价格单位：元/千 tokens。</summary>
+    public sealed record BaiduChatModel(string Id, string Name, string Status, double InputPrice, double OutputPrice);
+
+    // 模型列表缓存：UI 点一次就够，搜索时不再额外请求；1 小时后过期
+    static readonly object _modelLock = new();
+    static List<BaiduChatModel>? _modelCache;
+    static DateTime _modelCacheAt = DateTime.MinValue;
+
+    /// <summary>
+    /// 拉取当前账号在千帆可用的对话模型（GET /v2/models，API Key 鉴权）。
+    /// 失败返回 error 文案、不抛异常；refresh=true 时忽略缓存。
+    /// </summary>
+    public static async Task<(List<BaiduChatModel> models, string? error)> FetchBaiduChatModelsAsync(
+        string? apiKey, bool refresh = false, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(apiKey))
+            return (new List<BaiduChatModel>(), "请先在「百度千帆」里填写 API Key，再拉取模型列表。");
+
+        if (refresh == false)
+        {
+            lock (_modelLock)
+            {
+                if (_modelCache != null && DateTime.Now - _modelCacheAt < TimeSpan.FromHours(1))
+                    return (new List<BaiduChatModel>(_modelCache), null);
+            }
+        }
+
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, BaiduModelsUrl);
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey.Trim());
+            using var resp = await _http.SendAsync(req, cancellationToken);
+            var raw = await resp.Content.ReadAsStringAsync(cancellationToken);
+            if (resp.IsSuccessStatusCode == false)
+            {
+                Log($"拉取模型列表失败 HTTP {(int)resp.StatusCode}");
+                return (new List<BaiduChatModel>(), $"拉取模型列表失败（HTTP {(int)resp.StatusCode}），请稍后重试。");
+            }
+
+            var models = ParseBaiduChatModels(raw);
+            if (models.Count == 0)
+                return (models, "千帆返回的模型列表里没有可用的对话模型。");
+
+            lock (_modelLock) { _modelCache = models; _modelCacheAt = DateTime.Now; }
+            return (models, null);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return (new List<BaiduChatModel>(), "拉取模型列表已取消。");
+        }
+        catch (OperationCanceledException)
+        {
+            return (new List<BaiduChatModel>(), "拉取模型列表超时，请稍后重试。");
+        }
+        catch (Exception ex)
+        {
+            Log($"拉取模型列表异常: {ex.Message}");
+            return (new List<BaiduChatModel>(), "拉取模型列表失败，请检查网络后重试。");
+        }
+    }
+
+    static List<BaiduChatModel> ParseBaiduChatModels(string raw)
+    {
+        var list = new List<BaiduChatModel>();
+        try
+        {
+            var node = JsonNode.Parse(raw);
+            if (node?["data"] is not JsonArray data) return list;
+
+            foreach (var item in data)
+            {
+                if (item?["type"]?.ToString() is not "chat") continue;
+                var status = item["status"]?.ToString() ?? "";
+                if (string.Equals(status, "offline", StringComparison.OrdinalIgnoreCase)) continue;
+
+                var id = item["id"]?.ToString();
+                if (string.IsNullOrWhiteSpace(id)) continue;
+
+                list.Add(new BaiduChatModel(
+                    id!,
+                    item["model_name"]?.ToString() ?? id!,
+                    status,
+                    ModelPrice(item["pricing"]?["prompt"]),
+                    ModelPrice(item["pricing"]?["completion"])));
+            }
+
+            list.Sort((a, b) =>
+            {
+                int rank = ModelStatusRank(a.Status).CompareTo(ModelStatusRank(b.Status));
+                if (rank != 0) return rank;
+                int price = a.InputPrice.CompareTo(b.InputPrice);
+                return price != 0 ? price : string.CompareOrdinal(a.Id, b.Id);
+            });
+        }
+        catch (Exception ex) { Log($"解析模型列表异常: {ex.Message}"); }
+        return list;
+    }
+
+    // active/new 排前面，即将下线的排后面
+    static int ModelStatusRank(string status) => status switch
+    {
+        "active" => 0,
+        "new" => 0,
+        "soon_offline" => 1,
+        _ => 2,
+    };
+
+    // pricing 可能是固定价字符串，也可能是阶梯价数组（取最高档，避免低估成本）
+    static double ModelPrice(JsonNode? node)
+    {
+        if (node == null) return 0;
+        if (node is JsonArray tiers)
+        {
+            double max = 0;
+            foreach (var tier in tiers)
+                max = Math.Max(max, ModelPrice(tier?["price"]));
+            return max;
+        }
+        return double.TryParse(node.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : 0;
+    }
 
     [XmlFunction(FunctionMode.OneShot)]
     [Description("智能搜索生成(标准)：功能最全的AI搜索，支持深度搜索/追问，适合复杂研究。")]
     public async Task SmartChatSearch(
         [Description("搜索关键词")] string query,
-        [Description("模型：ernie-4.5-turbo-32k(默认，免开通最稳)/deepseek-v4-flash/deepseek-v4-pro(需在千帆开通)等")] string? model = null,
+        [Description("模型：默认 ernie-5.5-flash-preview，也可用 ernie-5.1 / deepseek-v4-flash-0731 等（可在插件设置里点「拉取可用模型」查看）")] string? model = null,
         [Description("深度搜索(更准但更慢更费额度)")] bool? deepSearch = null,
         [Description("时间范围：day/week/month/year")] string? timeRange = null,
         [Description("额外指令，引导回答方向")] string? instruction = null,
@@ -1028,33 +1221,76 @@ public partial class SmartWebSearch(
         if (!GetBaiduKeys(cfg).Any(k => !string.IsNullOrWhiteSpace(k)))
         { interactor.Poke("智能搜索生成需要百度千帆API Key"); return; }
 
-        var useModel = string.IsNullOrWhiteSpace(model) ? cfg.ChatSearchModel : model;
-        // 旧模型名（旧默认值或用户手填）已停用：自动回退并提示，避免升级后一直查不到东西
-        if (LegacyChatModels.TryGetValue(useModel, out var fallbackModel))
+        var requestedModel = (string.IsNullOrWhiteSpace(model) ? cfg.ChatSearchModel : model).Trim();
+        if (string.IsNullOrWhiteSpace(requestedModel)) requestedModel = DefaultChatSearchModel;
+        // 百度下架/改名的旧模型：本地先改写，省掉一次必然 invalid_model 的请求
+        if (LegacyChatModels.TryGetValue(requestedModel, out var mappedModel))
         {
-            Log($"模型 {useModel} 已停用，自动改用 {fallbackModel}（建议在插件设置中更新「智能搜索生成模型」）");
-            useModel = fallbackModel;
+            Log($"模型 {requestedModel} 已下线/改名，自动改用 {mappedModel}");
+            requestedModel = mappedModel;
         }
+
         var useDeepSearch = deepSearch ?? cfg.EnableDeepSearch;
         var results = Math.Clamp(maxResults ?? cfg.MaxResults, 1, 20);
-        var cacheKey = $"chat:{query}:{useModel}:{useDeepSearch}:{timeRange}:{instruction}:{enableReasoning}:{results}";
 
-        var body = new JsonObject
+        // 依次尝试：用户所选 → 备选顺序。百度下架模型报 invalid_model、账号未开通报 account_overdue，两种都换下一个
+        var candidates = new List<string> { requestedModel };
+        foreach (var fallback in ChatModelFallbacks)
         {
-            ["messages"] = new JsonArray { new JsonObject { ["role"] = "user", ["content"] = query } },
-            ["model"] = useModel,
-            ["search_source"] = "baidu_search_v2",
-            ["resource_type_filter"] = new JsonArray { new JsonObject { ["type"] = "web", ["top_k"] = results } },
-        };
-        if (useDeepSearch) body["enable_deep_search"] = true;
-        if (enableReasoning == true) body["enable_reasoning"] = true;
-        if (!string.IsNullOrWhiteSpace(instruction)) body["instruction"] = instruction;
-        ApplyTimeRange(body, timeRange);
+            if (candidates.Contains(fallback, StringComparer.OrdinalIgnoreCase) == false)
+                candidates.Add(fallback);
+        }
 
-        var result = await BaiduCallWithRotationAsync(BaiduChatUrl, body.ToJsonString(),
-            cacheKey, "智能搜索生成", raw => FormatChatSearchResults(raw, query), cfg);
+        JsonObject BuildBody(string modelName)
+        {
+            var body = new JsonObject
+            {
+                ["messages"] = new JsonArray { new JsonObject { ["role"] = "user", ["content"] = query } },
+                ["model"] = modelName,
+                ["search_source"] = "baidu_search_v2",
+                ["resource_type_filter"] = new JsonArray { new JsonObject { ["type"] = "web", ["top_k"] = results } },
+            };
+            if (useDeepSearch) body["enable_deep_search"] = true;
+            if (enableReasoning == true) body["enable_reasoning"] = true;
+            if (!string.IsNullOrWhiteSpace(instruction)) body["instruction"] = instruction;
+            ApplyTimeRange(body, timeRange);
+            return body;
+        }
 
-        interactor.Poke(result ?? "智能搜索生成失败，所有百度账号均不可用。可尝试使用普通搜索(Search)");
+        string? firstError = null;
+        string? output = null;
+        string? usedModel = null;
+        foreach (var candidate in candidates)
+        {
+            var cacheKey = $"chat:{query}:{candidate}:{useDeepSearch}:{timeRange}:{instruction}:{enableReasoning}:{results}";
+            string? businessCode = null;
+            var text = await BaiduCallWithRotationAsync(BaiduChatUrl, BuildBody(candidate).ToJsonString(),
+                cacheKey, "智能搜索生成", raw => FormatChatSearchResults(raw, query), cfg,
+                onBusinessError: code => businessCode = code);
+
+            if (businessCode is "invalid_model" or "account_overdue")
+            {
+                firstError ??= text;
+                Log($"模型 {candidate} 不可用（{businessCode}），尝试下一个");
+                continue;
+            }
+            if (text == null) break; // 所有账号都失败，换模型也没用
+
+            output = text;
+            usedModel = candidate;
+            break;
+        }
+
+        if (output == null)
+        {
+            interactor.Poke(firstError ?? "智能搜索生成失败，所有百度账号均不可用。可尝试使用普通搜索(Search)");
+            return;
+        }
+        if (usedModel != null && string.Equals(usedModel, requestedModel, StringComparison.OrdinalIgnoreCase) == false)
+        {
+            output += $"\n\n（原模型 {requestedModel} 当前不可用，已自动改用 {usedModel}；可在插件设置里点「拉取可用模型」更新。）";
+        }
+        interactor.Poke(output);
     }
 
     static string FormatChatSearchResults(string rawJson, string query)
@@ -2087,11 +2323,18 @@ public partial class SmartWebSearch(
 
     #region 引擎路由逻辑
 
+    /// <summary>能做普通网页搜索（Search 工具）的引擎：百度未勾「普通搜索」时不算。</summary>
+    static List<string> GetSearchEngines(SmartWebSearchConfig cfg) =>
+        cfg.GetEffectiveEngines()
+            .Where(id => string.Equals(id, "baidu", StringComparison.Ordinal) == false || cfg.IsBaiduToolEnabled("search"))
+            .ToList();
+
     static bool IsEngineReady(string engine, SmartWebSearchConfig cfg) => engine switch
     {
         "anysearch" => true,
         "tavily" => GetTavilyKeys(cfg).Any(k => string.IsNullOrWhiteSpace(k) == false),
-        "baidu" => GetBaiduKeys(cfg).Any(k => string.IsNullOrWhiteSpace(k) == false),
+        // 百度未勾选「普通搜索」时不参与 Search 路由（AI 总结/热搜/识图仍可独立使用）
+        "baidu" => cfg.IsBaiduToolEnabled("search") && GetBaiduKeys(cfg).Any(k => string.IsNullOrWhiteSpace(k) == false),
         "deepseek" => string.IsNullOrWhiteSpace(cfg.DeepSeekApiKey) == false,
         _ => false,
     };
@@ -2102,7 +2345,7 @@ public partial class SmartWebSearch(
             : IsChineseQuery(query)
                 ? new[] { "baidu", "tavily", "deepseek", "anysearch" }
                 : new[] { "tavily", "baidu", "deepseek", "anysearch" };
-        IReadOnlyList<string> selected = cfg.GetEnabledEngines();
+        IReadOnlyList<string> selected = cfg.GetEffectiveEngines();
         return priority.Where(id => selected.Contains(id) && IsEngineReady(id, cfg)).ToList();
     }
 
@@ -2353,7 +2596,8 @@ public partial class SmartWebSearch(
     /// </summary>
     async Task<string?> BaiduCallWithRotationAsync(
         string url, string bodyJson, string? cacheKey, string label,
-        Func<string, string?> formatter, SmartWebSearchConfig cfg, bool isGet = false, bool reportBusinessErrors = true)
+        Func<string, string?> formatter, SmartWebSearchConfig cfg, bool isGet = false, bool reportBusinessErrors = true,
+        Action<string?>? onBusinessError = null)
     {
         if (cacheKey != null)
             cacheKey = BuildProviderCacheKey("baidu", url, bodyJson, cacheKey, GetBaiduKeys(cfg));
@@ -2413,7 +2657,12 @@ public partial class SmartWebSearch(
                     }
 
                     var retryBizError = BaiduBusinessErrorText(raw, label);
-                    if (retryBizError != null) { Log($"{label} 业务错误(重试): {retryBizError}"); return reportBusinessErrors ? retryBizError : null; }
+                    if (retryBizError != null)
+                    {
+                        Log($"{label} 业务错误(重试): {retryBizError}");
+                        onBusinessError?.Invoke(JsonError(raw).code);
+                        return reportBusinessErrors ? retryBizError : null;
+                    }
 
                     var retryResult = formatter(raw);
                     if (retryResult == null) continue;
@@ -2450,6 +2699,7 @@ public partial class SmartWebSearch(
                         continue;
                     }
                     Log($"{label} 业务错误(code={bizCode}): {bizMsg}");
+                    onBusinessError?.Invoke(bizCode);
                     return reportBusinessErrors ? bizErrorText : null;
                 }
 
@@ -2656,16 +2906,20 @@ public partial class SmartWebSearch(
     }
 
     static List<string> GetTavilyKeys(SmartWebSearchConfig cfg) =>
-        new() { cfg.TavilyApiKey1, cfg.TavilyApiKey2, cfg.TavilyApiKey3, cfg.TavilyApiKey4 };
+        NormalizeKeys(cfg.TavilyApiKey1, cfg.TavilyApiKey2, cfg.TavilyApiKey3, cfg.TavilyApiKey4);
 
     static List<string> GetBaiduKeys(SmartWebSearchConfig cfg) =>
-        new() { cfg.BaiduApiKey1, cfg.BaiduApiKey2, cfg.BaiduApiKey3, cfg.BaiduApiKey4 };
+        NormalizeKeys(cfg.BaiduApiKey1, cfg.BaiduApiKey2, cfg.BaiduApiKey3, cfg.BaiduApiKey4);
 
     static List<string> GetSauceKeys(SmartWebSearchConfig cfg) =>
-        new() { cfg.SauceNaoApiKey1, cfg.SauceNaoApiKey2 };
+        NormalizeKeys(cfg.SauceNaoApiKey1, cfg.SauceNaoApiKey2);
 
     static List<string> GetTraceKeys(SmartWebSearchConfig cfg) =>
-        new() { cfg.TraceMoeApiKey1, cfg.TraceMoeApiKey2 };
+        NormalizeKeys(cfg.TraceMoeApiKey1, cfg.TraceMoeApiKey2);
+
+    // 从网页复制密钥经常带首尾空格/换行，原样发送会被服务端判为无效 Key（SauceNAO 尤其明显），统一裁掉
+    static List<string> NormalizeKeys(params string?[] keys) =>
+        keys.Select(k => (k ?? "").Trim()).ToList();
 
     // ============ JSON 安全读取辅助 ============
 
@@ -2729,8 +2983,8 @@ public partial class SmartWebSearch(
         // 常见错误补一句中文处理建议，避免只看到英文原文和"空结果"
         var hint = code switch
         {
-            "account_overdue" => "（该账号在百度模型服务上欠费/未开通所选模型：请到百度智能云控制台检查账户余额，或在插件设置里换用 ernie-4.5-turbo-32k）",
-            "invalid_model" => "（模型名不存在或未开通：请在插件设置里换用 ernie-4.5-turbo-32k）",
+            "account_overdue" => "（该账号未开通或欠费：请到百度智能云控制台检查余额，并在「在线推理」开通所选模型；或在插件设置里点「拉取可用模型」换一个）",
+            "invalid_model" => "（模型名不存在或已被百度下线：请在插件设置里点「拉取可用模型」重新选择一个）",
             _ => ""
         };
         return $"{label}调用失败（code={code}）：{message}{hint}";

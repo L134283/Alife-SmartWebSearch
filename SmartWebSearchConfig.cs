@@ -29,6 +29,10 @@ public class SmartWebSearchConfig
     public string BaiduApiKey3 { get; set; } = "";
     public string BaiduApiKey4 { get; set; } = "";
 
+    // 百度提供的工具较多，用户可只勾选要用的；未勾选的不注册函数、不注入工具说明。
+    // null = 旧配置（未迁移）→ 全部启用；空列表 = 全部关闭。
+    public List<string>? BaiduTools { get; set; }
+
     // === AnySearch 配置 ===
     // AnySearch 端点固定: https://api.anysearch.com/v1/search
     // 认证: 可空。留空走匿名模式(免Key，速率/配额较低，开箱即用)；配置后走 Bearer 认证(更高额度)
@@ -52,11 +56,11 @@ public class SmartWebSearchConfig
     // 限时免费，搜索+大模型总结一步到位
     public string SummaryModel { get; set; } = "auto_thinking";
 
-    // 标准版智能搜索生成使用的模型：ernie-4.5-turbo-32k（百度自研，默认，免开通最稳）
-    // 也可用 deepseek-v4-flash / deepseek-v4-pro（DeepSeek 系列需账号在千帆开通，未开通会报 account_overdue）
-    // 功能最全面，支持可选深度搜索、知识注入、追问等
-    // 注：deepseek-v3.2 / deepseek-r1 等旧模型已停用，配置为旧名时插件会自动回退到默认模型
-    public string ChatSearchModel { get; set; } = "ernie-4.5-turbo-32k";
+    // 标准版智能搜索生成使用的模型：ernie-5.5-flash-preview（百度 2026-11 下架 ernie-4.5-turbo-32k 后，
+    // 当前在售对话模型里单价最低的一个；具体可用模型可在设置里点「拉取可用模型」实时读取）
+    // 也可用 ernie-5.1 / ernie-light-dt-1.0 / deepseek-v4-flash-0731 / deepseek-v4-pro（需账号在千帆开通对应模型）
+    // 注：百度下架模型会返回 invalid_model，插件会按备选顺序自动兜底并提示
+    public string ChatSearchModel { get; set; } = "ernie-5.5-flash-preview";
 
     // 是否启用深度搜索（智能搜索生成专用，更精准但更慢，耗费较多额度）
     public bool EnableDeepSearch { get; set; } = false;
@@ -91,6 +95,46 @@ public class SmartWebSearchConfig
     public bool ImplicitInjection { get; set; } = false;
 
     static readonly string[] supportedEngines = { "anysearch", "tavily", "baidu", "deepseek" };
+
+    // 百度工具：普通搜索 / AI总结(高性能版) / 智能搜索生成(标准版) / 热搜 / 识图
+    static readonly string[] allBaiduTools = { "search", "summary", "chatsearch", "trending", "imagerecognition" };
+
+    public IReadOnlyList<string> GetBaiduTools()
+    {
+        if (BaiduTools == null) return allBaiduTools.ToList();
+        return BaiduTools
+            .Where(id => string.IsNullOrWhiteSpace(id) == false)
+            .Select(id => id.Trim().ToLowerInvariant())
+            .Where(id => allBaiduTools.Contains(id, StringComparer.Ordinal))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    public bool IsBaiduToolEnabled(string tool) =>
+        GetBaiduTools().Contains(tool, StringComparer.OrdinalIgnoreCase);
+
+    public void SetBaiduToolEnabled(string tool, bool enabled)
+    {
+        string id = tool.Trim().ToLowerInvariant();
+        if (allBaiduTools.Contains(id, StringComparer.Ordinal) == false)
+            throw new ArgumentOutOfRangeException(nameof(tool), "不支持的百度工具");
+
+        List<string> selected = GetBaiduTools().ToList();
+        if (enabled && selected.Contains(id) == false)
+            selected.Add(id);
+        else if (enabled == false)
+            selected.Remove(id);
+        // 按固定顺序保存，便于比较与调试
+        BaiduTools = allBaiduTools.Where(t => selected.Contains(t, StringComparer.Ordinal)).ToList();
+    }
+
+    /// <summary>
+    /// 实际生效的引擎：百度勾选了但一个工具都没留，视为未启用（不注入说明、不路由）。
+    /// </summary>
+    public IReadOnlyList<string> GetEffectiveEngines() =>
+        GetEnabledEngines()
+            .Where(id => string.Equals(id, "baidu", StringComparison.Ordinal) == false || GetBaiduTools().Count > 0)
+            .ToList();
 
     public IReadOnlyList<string> GetEnabledEngines()
     {
